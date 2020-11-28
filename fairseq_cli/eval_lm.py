@@ -59,6 +59,13 @@ class WordStat(object):
 def main(parsed_args):
     assert parsed_args.path is not None, '--path required for evaluation!'
 
+    if parsed_args.dstore_mmap is not None:
+        d = os.path.dirname(parsed_args.dstore_mmap)
+        print('mmap from {}'.format(d))
+        if not os.path.exists(d):
+            print('making dir')
+            os.system('mkdir -p {}'.format(d))
+
     utils.import_user_module(parsed_args)
 
     logger.info(parsed_args)
@@ -121,7 +128,8 @@ def main(parsed_args):
         num_shards=args.num_shards,
         shard_id=args.shard_id,
         num_workers=args.num_workers,
-    ).next_epoch_itr(shuffle=False)
+    ).next_epoch_itr(shuffle=True)
+    #).next_epoch_itr(shuffle=False)
 
     gen_timer = StopwatchMeter()
     scorer = SequenceScorer(task.target_dictionary, args.softmax_batch, args=args)
@@ -182,26 +190,41 @@ def main(parsed_args):
 
             for i, hypos_i in enumerate(hypos):
                 hypo = hypos_i[0]
+                is_done = False
+                failed = False
                 if args.save_knnlm_dstore:
                     shape = hypo['dstore_keys'].shape
                     if shape[0] == args.tokens_per_sample:
                         if dstore_idx + shape[0] > args.dstore_size:
                             shape = [args.dstore_size - dstore_idx]
                             hypo['dstore_keys'] = hypo['dstore_keys'][:shape[0]]
-                        if args.dstore_fp16:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int16)
-                        else:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int)
+                            hypo['tokens'] = hypo['tokens'][:shape[0]]
+                            is_done = True
+                        try:
+                            if args.dstore_fp16:
+                                dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
+                                    -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
+                                dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
+                                    -1, 1).cpu().numpy().astype(np.int16)
+                            else:
+                                dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
+                                    -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
+                                dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
+                                    -1, 1).cpu().numpy().astype(np.int)
 
-                        dstore_idx += shape[0]
+                            dstore_idx += shape[0]
+                        except:
+                            is_done = True
+                            failed = True
                     else:
                         print('Skipping this one with shape', shape)
+
+                if is_done:
+                    print('dstore_idx : {}'.format(dstore_idx))
+                    if failed:
+                        print('FAILED')
+                    raise Exception('DONE')
+                    #break
 
                 sample_id = sample['id'][i]
 
