@@ -8,9 +8,11 @@
 Evaluate the perplexity of a trained language model.
 """
 
+import collections
 import logging
 import math
 import os
+import json
 
 import torch
 import numpy as np
@@ -28,6 +30,64 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger('fairseq_cli.eval_lm')
+
+
+def invert(lst):
+    d = collections.defaultdict(list)
+    for x in lst:
+        for k, v in x.items():
+            d[k].append(v)
+    return d
+
+
+def write_extra(save_extra, outdir):
+    save_extra = invert(save_extra)
+    outdir = os.path.abspath(outdir)
+    try:
+        os.system('mkdir -p {}'.format(outdir))
+    except:
+        pass
+    metadata = {}
+    metadata['objects'] = []
+    for k, lst in save_extra.items():
+        outfile = os.path.join(outdir, '{}.npy'.format(k))
+        v = lst[0]
+        dtype = v.dtype
+        shape = list(v.shape)
+        n = 0
+
+        for v in lst:
+            n += v.shape[0]
+        shape = tuple([n] + shape[1:])
+
+        print('writing to {} with shape {} and type {}'.format(outfile, shape, dtype))
+
+        offset = 0
+        m = np.memmap(outfile, dtype=dtype, mode='w+', shape=shape)
+        for v in lst:
+            size = v.shape[0]
+            m[offset:offset+size] = v
+            offset += size
+        del m
+
+        metadata['objects'].append((k, shape, str(dtype)))
+
+    outfile = os.path.join(outdir, 'metadata.txt')
+    print('writing {}'.format(outfile))
+    with open(outfile, 'w') as f:
+        f.write(json.dumps(metadata))
+
+
+def collate(save_extra):
+    def helper(extra_lst):
+        new_extra = collections.defaultdict(list)
+        for extra in extra_lst:
+            for k, v in extra.items():
+                new_extra[k].append(v)
+        for k, v in new_extra.items():
+            new_extra[k] = np.concatenate(v, 0)
+        return new_extra
+    return helper(save_extra)
 
 
 class WordStat(object):
@@ -175,6 +235,7 @@ def main(parsed_args):
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
 
         dstore_idx = 0
+        save_extra = []
         for ex_i, sample in enumerate(t):
             if 'net_input' not in sample:
                 continue
@@ -183,9 +244,10 @@ def main(parsed_args):
 
             gen_timer.start()
             if args.knnlm:
-                hypos = scorer.generate(models, sample, knn_dstore=knn_dstore)
+                hypos, extra = scorer.generate(models, sample, knn_dstore=knn_dstore)
             else:
-                hypos = scorer.generate(models, sample)
+                hypos, extra = scorer.generate(models, sample)
+            save_extra.append(extra)
             gen_timer.stop(sample['ntokens'])
 
             for i, hypos_i in enumerate(hypos):
@@ -287,6 +349,13 @@ def main(parsed_args):
 
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})
+
+            # TODO: Remove.
+            write_extra(save_extra, 'save_demo')
+            #import ipdb; ipdb.set_trace()
+            #pass
+
+    write_extra(save_extra, 'save_demo')
 
     if args.save_knnlm_dstore:
         print("dstore_idx", dstore_idx, "final shape", shape)

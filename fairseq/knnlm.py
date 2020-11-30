@@ -97,22 +97,32 @@ class KNN_Dstore(object):
         qshape = queries.shape
         queries = queries.view(-1, qshape[-1])
         tgt = tgt.contiguous().view(-1)
-        dists, knns = self.get_knns(queries[tgt != pad_idx])
+        select_mask = tgt != pad_idx
+        dists, knns = self.get_knns(queries[select_mask])
         # (T_reducedxB)xK
         dists = torch.from_numpy(dists).cuda()
         start = time.time()
-        dists = dist_func(dists, knns, queries[tgt != pad_idx, :], function=self.sim_func)
+        dists = dist_func(dists, knns, queries[select_mask, :], function=self.sim_func)
         probs = utils.log_softmax(dists, dim=-1)
 
-        index_mask = torch.eq(torch.from_numpy(self.vals[knns]).long().cuda().squeeze(-1), tgt[tgt != pad_idx].unsqueeze(-1)).float()
+        index_mask = torch.eq(torch.from_numpy(self.vals[knns]).long().cuda().squeeze(-1), tgt[select_mask].unsqueeze(-1)).float()
         index_mask[index_mask == 0] = -10000 # for stability
         index_mask[index_mask == 1] = 0
 
         # (T_reducedxB)
         yhat_knn_prob = torch.logsumexp(probs + index_mask, dim=-1).clone()
         full_yhat_knn_prob = torch.zeros(qshape[0]*qshape[1]).float().fill_(-10000).cuda()
-        full_yhat_knn_prob[tgt != pad_idx] = yhat_knn_prob
+        full_yhat_knn_prob[select_mask] = yhat_knn_prob
+
+        # Extra
+        extra = {}
+        extra['target'] = tgt[select_mask]
+        extra['queries'] = queries[select_mask]
+        extra['dists'] = dists
+        extra['knns'] = torch.from_numpy(knns)
+        extra['keys'] = torch.from_numpy(self.keys[knns.reshape(-1)].reshape(knns.shape[0], knns.shape[1], -1))
+        extra['vals'] = torch.from_numpy(self.vals[knns.reshape(-1)].reshape(knns.shape[0], knns.shape[1]))
 
         # TxBx1
-        return full_yhat_knn_prob.view(qshape[0], qshape[1], 1)
+        return full_yhat_knn_prob.view(qshape[0], qshape[1], 1), extra
 
