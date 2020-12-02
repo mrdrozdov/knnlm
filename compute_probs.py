@@ -192,9 +192,12 @@ def main(args):
         nbatches = 5
 
     k_range = [2, 4, 8, 16, 32, 64]
+    l_range = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
     results_at_k = {}
     for limit in k_range:
         results_at_k[limit] = collections.defaultdict(list)
+        for l in l_range:
+            results_at_k[(limit, l)] = collections.defaultdict(list)
 
     # compute probs
     offset = 0
@@ -204,27 +207,39 @@ def main(args):
         target = batch['target']
         dists = batch['dists']
         vals = batch['vals']
-        probs = batch['probs']
+        probs = torch.exp(batch['probs'])
 
         # use distance
         for limit in k_range:
             b = batch_limit(batch, limit)
-            logprobs = compute_knn_probs(b)
-            results_at_k[limit]['knn_logprobs'].append(logprobs.cpu().detach())
+            new_probs = torch.exp(compute_knn_probs(b))
+            results_at_k[limit]['knn_probs'].append(new_probs.cpu().detach())
+
+            for l in l_range:
+                mix_probs = (1 - l) * probs + l * new_probs
+                results_at_k[(limit, l)]['mix_probs'].append(mix_probs.cpu().detach())
 
         # find optimal batch
         obatch = find_optimal_batch(batch)
         for limit in k_range:
             b = batch_limit(obatch, limit)
-            logprobs = compute_knn_probs(b)
-            results_at_k[limit]['o_logprobs'].append(logprobs.cpu().detach())
+            new_probs = torch.exp(compute_knn_probs(b))
+            results_at_k[limit]['o_probs'].append(new_probs.cpu().detach())
+
+            for l in l_range:
+                mix_probs = (1 - l) * probs + l * new_probs
+                results_at_k[(limit, l)]['mix_o_probs'].append(mix_probs.cpu().detach())
 
         # find optimal batch (v2)
         obatch = find_optimal_batch_v2(batch)
         for limit in k_range:
             b = batch_limit(obatch, limit)
-            logprobs = compute_knn_probs(b)
-            results_at_k[limit]['o_v2_logprobs'].append(logprobs.cpu().detach())
+            new_probs = torch.exp(compute_knn_probs(b))
+            results_at_k[limit]['o_v2_probs'].append(new_probs.cpu().detach())
+
+            for l in l_range:
+                mix_probs = (1 - l) * probs + l * new_probs
+                results_at_k[(limit, l)]['mix_o_v2_probs'].append(mix_probs.cpu().detach())
 
         # end
         offset += batch_size
@@ -233,21 +248,29 @@ def main(args):
     print('knn')
     for limit in k_range:
         r = results_at_k[limit]
-        logprobs = torch.cat(r['knn_logprobs'], 0)
-        probs = torch.exp(logprobs)
+        probs = torch.cat(r['knn_probs'], 0)
         print(limit, probs.mean())
     print('optimal')
     for limit in k_range:
         r = results_at_k[limit]
-        logprobs = torch.cat(r['o_logprobs'], 0)
-        probs = torch.exp(logprobs)
+        probs = torch.cat(r['o_probs'], 0)
         print(limit, probs.mean())
     print('optimal v2')
     for limit in k_range:
         r = results_at_k[limit]
-        logprobs = torch.cat(r['o_v2_logprobs'], 0)
-        probs = torch.exp(logprobs)
+        probs = torch.cat(r['o_v2_probs'], 0)
         print(limit, probs.mean())
+
+    print('---')
+
+    for key in ['mix_probs', 'mix_o_probs', 'mix_o_v2_probs']:
+        for limit in k_range:
+            for l in l_range:
+                probs = torch.cat(results_at_k[(limit, l)][key], 0)
+                out = probs.mean().item()
+                print('("{}", {}, {}, {:.4f}),'.format(key, limit, l, out))
+
+
 
 
 if __name__ == '__main__':
