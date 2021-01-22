@@ -40,42 +40,63 @@ def invert(lst):
     return d
 
 
-def write_extra(save_extra, outdir):
-    save_extra = invert(save_extra)
-    outdir = os.path.abspath(outdir)
-    try:
-        os.system('mkdir -p {}'.format(outdir))
-    except:
-        pass
-    metadata = {}
-    metadata['objects'] = []
-    for k, lst in save_extra.items():
-        outfile = os.path.join(outdir, '{}.npy'.format(k))
-        v = lst[0]
-        dtype = v.dtype
-        shape = list(v.shape)
-        n = 0
+class Writer:
+    def __init__(self, outdir, max_size=-1, k=-1, vec_size=1024):
+        # TODO: Write metadata. Should record last offset.
+        self.outdir = os.path.abspath(outdir)
+        self.initialized = False
+        self.fp = {}
+        self.dtypes= {
+                'target': [max_size],
+                'queries': [max_size, vec_size],
+                'dists': [max_size, k],
+                'knns': [max_size, k],
+                'keys': [max_size, k, vec_size],
+                'vals': [max_size, k],
+                'probs': [max_size],
+        }
+        self.max_size = max_size
+        self.k = k
+        self.vec_size = vec_size
+        self.offset = 0
 
-        for v in lst:
-            n += v.shape[0]
-        shape = tuple([n] + shape[1:])
+    def initialize(self):
+        print('Initializing...')
+        # Make directory.
+        outdir = self.outdir
+        try:
+            os.system('mkdir -p {}'.format(outdir))
+        except:
+            pass
 
-        print('writing to {} with shape {} and type {}'.format(outfile, shape, dtype))
+        # Open arrays.
+        for k, shape in self.dtypes.items():
+            shape = tuple(shape)
+            outfile = os.path.join(outdir, '{}.npy'.format(k))
+            self.fp[k] = np.memmap(outfile, dtype=np.float, mode='w+', shape=shape)
 
-        offset = 0
-        m = np.memmap(outfile, dtype=dtype, mode='w+', shape=shape)
-        for v in lst:
-            size = v.shape[0]
+        self.initialized = True
+
+    def update(self, o):
+        if not self.initialized:
+            self.initialize()
+        offset = self.offset
+        size = None
+        for k in self.dtypes.keys():
+            v = o[k]
+            m = self.fp[k]
+            if size is None:
+                size = v.shape[0]
+                if self.offset + size > self.max_size:
+                    size = self.max_size - self.offset
             m[offset:offset+size] = v
-            offset += size
-        del m
+        self.offset += size
+        if self.offset >= self.max_size:
+            raise Exception("Done. Filled up to max_size.")
 
-        metadata['objects'].append((k, shape, str(dtype)))
-
-    outfile = os.path.join(outdir, 'metadata.txt')
-    print('writing {}'.format(outfile))
-    with open(outfile, 'w') as f:
-        f.write(json.dumps(metadata))
+    def close(self):
+        # TODO
+        raise NotImplementedError
 
 
 def collate(save_extra):
@@ -234,8 +255,10 @@ def main(parsed_args):
                 dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
 
+        if args.save_extra:
+            writer = Writer(outdir='demo-out', max_size=args.save_extra_max_size, k=args.k, vec_size=1024)
+
         dstore_idx = 0
-        save_extra = []
         for ex_i, sample in enumerate(t):
             if 'net_input' not in sample:
                 continue
@@ -247,7 +270,7 @@ def main(parsed_args):
                 hypos, extra = scorer.generate(models, sample, knn_dstore=knn_dstore)
             else:
                 hypos, extra = scorer.generate(models, sample)
-            save_extra.append(extra)
+            #save_extra.append(extra)
             gen_timer.stop(sample['ntokens'])
 
             for i, hypos_i in enumerate(hypos):
@@ -350,12 +373,9 @@ def main(parsed_args):
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})
 
-            # TODO: Remove.
-            write_extra(save_extra, 'save_demo')
-            #import ipdb; ipdb.set_trace()
-            #pass
-
-    write_extra(save_extra, 'save_demo')
+            # Write saved values to disk.
+            if args.save_extra:
+                writer.update(extra)
 
     if args.save_knnlm_dstore:
         print("dstore_idx", dstore_idx, "final shape", shape)

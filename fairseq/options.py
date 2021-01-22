@@ -491,6 +491,11 @@ def add_eval_lm_args(parser):
                        help='save keys for the knnlm datastore')
     group.add_argument('--dstore-mmap', default=None, type=str,
                        help='If saving knnlm dstore, save keys and values to this file')
+    # Extra arguments for optimal re-ranking.
+    group.add_argument('--save-extra', action='store_true',
+                       help='save more items')
+    group.add_argument('--save-extra-max-size', default=None, type=int,
+                       help='max_size for extra data')
     # fmt: on
 
 
