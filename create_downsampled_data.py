@@ -36,6 +36,8 @@ def main(args):
     print('Copying...')
     os.system('cp {} {}'.format(os.path.join(args.output, 'wiki.train.tokens'), os.path.join(args.output, 'wiki.valid.tokens')))
     os.system('cp {} {}'.format(os.path.join(args.output, 'wiki.train.tokens'), os.path.join(args.output, 'wiki.test.tokens')))
+    # Copy the original train data to maintain a similar vocab size.
+    os.system('cp {} {}'.format(os.path.join(args.input, 'wiki.train.tokens'), os.path.join(args.output, 'wiki.train.tokens')))
 
 
 def write_data(path, data):

@@ -494,6 +494,8 @@ def add_eval_lm_args(parser):
     # Extra arguments for optimal re-ranking.
     group.add_argument('--save-extra', action='store_true',
                        help='save more items')
+    group.add_argument('--save-extra-path', default=None, type=str,
+                       help='directory to save data')
     group.add_argument('--save-extra-max-size', default=None, type=int,
                        help='max_size for extra data')
     # fmt: on

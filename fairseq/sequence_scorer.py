@@ -112,6 +112,10 @@ class SequenceScorer(object):
                         pad_idx=self.pad)
                 # Add original probs.
                 extra['probs'] = probs[orig_target != self.pad].clone()
+                # Add reference data.
+                extra['src_tokens'] = sample['net_input']['src_tokens'][orig_target != self.pad].clone()
+                d0, d1 = orig_target.shape
+                extra['src_id'] = sample['id'].view(d0, 1).expand(d0, d1)[orig_target != self.pad].clone()
                 extra = self.sanitize(extra)
                 # TODO: At this point, extra should have all the required data. Write this to file.
                 yhat_knn_prob = yhat_knn_prob.permute(1, 0, 2).squeeze(-1)

@@ -29,13 +29,15 @@ class KNN_Dstore(object):
 
         if args.dstore_fp16:
             print('Keys are fp16 and vals are int16')
-            if not args.no_load_keys:
-                self.keys = np.memmap(args.dstore_filename+'_keys.npy', dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
+            # Load the keys even if they are not being used.
+            # if not args.no_load_keys:
+            self.keys = np.memmap(args.dstore_filename+'_keys.npy', dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
             self.vals = np.memmap(args.dstore_filename+'_vals.npy', dtype=np.int16, mode='r', shape=(self.dstore_size, 1))
         else:
             print('Keys are fp32 and vals are int64')
-            if not args.no_load_keys:
-                self.keys = np.memmap(args.dstore_filename+'_keys.npy', dtype=np.float32, mode='r', shape=(self.dstore_size, self.dimension))
+            # Load the keys even if they are not being used.
+            # if not args.no_load_keys:
+            self.keys = np.memmap(args.dstore_filename+'_keys.npy', dtype=np.float32, mode='r', shape=(self.dstore_size, self.dimension))
             self.vals = np.memmap(args.dstore_filename+'_vals.npy', dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
         # If you wish to load all the keys into memory
