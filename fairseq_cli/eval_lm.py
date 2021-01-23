@@ -45,6 +45,7 @@ class Writer:
         # TODO: Write metadata. Should record last offset.
         self.outdir = os.path.abspath(outdir)
         self.initialized = False
+        self.done = False
         self.fp = {}
         self.dtypes= {
                 'target': [max_size],
@@ -80,6 +81,8 @@ class Writer:
     def update(self, o):
         if not self.initialized:
             self.initialize()
+        if self.done:
+            return
         offset = self.offset
         size = None
         for k in self.dtypes.keys():
@@ -89,10 +92,11 @@ class Writer:
                 size = v.shape[0]
                 if self.offset + size > self.max_size:
                     size = self.max_size - self.offset
-            m[offset:offset+size] = v
+            m[offset:offset+size] = v[:size]
         self.offset += size
         if self.offset >= self.max_size:
-            raise Exception("Done. Filled up to max_size.")
+            self.done = True
+            print('Done! Filled reference data with {} items.'.format(self.offset))
 
     def close(self):
         # TODO
@@ -275,8 +279,6 @@ def main(parsed_args):
 
             for i, hypos_i in enumerate(hypos):
                 hypo = hypos_i[0]
-                is_done = False
-                failed = False
                 if args.save_knnlm_dstore:
                     shape = hypo['dstore_keys'].shape
                     if shape[0] == args.tokens_per_sample:
@@ -284,7 +286,6 @@ def main(parsed_args):
                             shape = [args.dstore_size - dstore_idx]
                             hypo['dstore_keys'] = hypo['dstore_keys'][:shape[0]]
                             hypo['tokens'] = hypo['tokens'][:shape[0]]
-                            is_done = True
                         try:
                             if args.dstore_fp16:
                                 dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
@@ -299,17 +300,9 @@ def main(parsed_args):
 
                             dstore_idx += shape[0]
                         except:
-                            is_done = True
-                            failed = True
+                            pass
                     else:
                         print('Skipping this one with shape', shape)
-
-                if is_done:
-                    print('dstore_idx : {}'.format(dstore_idx))
-                    if failed:
-                        print('FAILED')
-                    raise Exception('DONE')
-                    #break
 
                 sample_id = sample['id'][i]
 
