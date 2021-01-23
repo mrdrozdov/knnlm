@@ -23,13 +23,13 @@ import re
 def main(args):
     np.random.seed(args.seed)
 
-    # tr_data = read_and_group(os.path.join(args.input, 'wiki.train.tokens'))
-    # _ = read_and_group(os.path.join(args.input, 'wiki.valid.tokens'))
-    # _ = read_and_group(os.path.join(args.input, 'wiki.test.tokens'))
+    tr_data = read_and_group(os.path.join(args.input, 'wiki.train.tokens'))
+    _ = read_and_group(os.path.join(args.input, 'wiki.valid.tokens'))
+    _ = read_and_group(os.path.join(args.input, 'wiki.test.tokens'))
 
-    # new_tr_data = read_and_downsample(os.path.join(args.input, 'wiki.train.tokens'), data=tr_data, n=100)
-    # os.system('mkdir -p {}'.format(args.output))
-    # write_data(os.path.join(args.output, 'wiki.train.tokens'), new_tr_data)
+    new_tr_data = read_and_downsample(os.path.join(args.input, 'wiki.train.tokens'), data=tr_data, n=100)
+    os.system('mkdir -p {}'.format(args.output))
+    write_data(os.path.join(args.output, 'wiki.train.tokens'), new_tr_data)
 
     _ = read_and_group(os.path.join(args.output, 'wiki.train.tokens'))
 
