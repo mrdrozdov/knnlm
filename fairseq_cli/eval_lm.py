@@ -285,7 +285,7 @@ def main(parsed_args):
             if args.save_knnlm_dstore and not dstore_full:
                 _keys = extra['keys']
                 shape = _keys.shape
-                if shape[0] == args.tokens_per_sample or args.no_min_context:
+                if shape[0] == len(hypos) * args.tokens_per_sample or args.no_min_context:
                     if dstore_idx + shape[0] > args.dstore_size:
                         shape = [args.dstore_size - dstore_idx]
                         dstore_full = True
