@@ -30,9 +30,6 @@ def main(args):
         res = collections.defaultdict(list)
 
         bsize = 10000
-        xq = np.ones((bsize, 1024))
-        xt = np.ones((bsize, 1))
-        xp = np.ones((bsize, 1))
         dsize = dstore['vec'].shape[0]
         nbatches = dsize // bsize
         if nbatches * bsize < dsize:
@@ -43,6 +40,11 @@ def main(args):
         for i in tqdm(range(nbatches)):
             start = i * bsize
             end = min(start + bsize, dsize)
+            size = end - start
+
+            xq = np.ones((size, 1024))
+            xt = np.ones((size, 1))
+            xp = np.ones((size, 1))
 
             xq[:] = dstore['vec'][start:end]
             xt[:] = dstore['tgt'][start:end]
@@ -57,10 +59,12 @@ def main(args):
                             coeff)
                 res[coeff].append(new_p.cpu().numpy())
 
-        for coeff in coeff_lst:
-            new_p = np.concatenate(res[coeff], axis=0)
-            ppl = eval_ppl(new_p)
-            print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
+            print('iter = {}'.format(i))
+
+            for coeff in coeff_lst:
+                new_p = np.concatenate(res[coeff], axis=0)
+                ppl = eval_ppl(new_p)
+                print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
 
 
 class Dstore:
@@ -101,9 +105,7 @@ class KNN:
                 # Default behavior for IP metric is to return faiss distances.
                 qsize = q.shape
                 if self.metric_type == 'l2':
-                    print('Lookup...')
                     knns_vecs = torch.from_numpy(self.keys[k]).float().cuda().view(qsize[0], self.k, -1)
-                    print('done.')
                     if self.half:
                         knns_vecs = knns_vecs.half()
                     query_vecs = q.view(qsize[0], 1, qsize[1]).repeat(1, self.k, 1)
@@ -125,9 +127,7 @@ class KNN:
         qshape = queries.shape
         queries = torch.from_numpy(queries).float().cuda().view(-1, qshape[-1])
         tgt = torch.from_numpy(tgt).long().cuda().view(-1)
-        print('Compute distance...')
         dists, knns = self.get_knns(queries.cpu().numpy())
-        print('done.')
         # BxK
         dists = torch.from_numpy(dists).float().cuda()
         dists = dist_func(dists, knns, queries, function=self.sim_func)
