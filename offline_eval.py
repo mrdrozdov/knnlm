@@ -1,12 +1,16 @@
 import argparse
 import collections
 import os
+import time
 
 import faiss
 import numpy as np
 import torch
 
 from tqdm import tqdm
+
+
+_global = collections.defaultdict(list)
 
 
 def main(args):
@@ -23,6 +27,7 @@ def main(args):
                   probe=args.probe,
                   k=args.k,
                   sim_func=args.knn_sim_func,
+                  lookup_mode=args.knn_lookup_mode,
                   )
         print('done.')
 
@@ -61,10 +66,30 @@ def main(args):
 
             print('iter = {}'.format(i))
 
+            Timer.print_summary(_global)
+
+            print('PERPLEXITY')
             for coeff in coeff_lst:
                 new_p = np.concatenate(res[coeff], axis=0)
                 ppl = eval_ppl(new_p)
                 print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
+            print('')
+
+
+class Timer:
+    def __enter__(self):
+        self.start = time.clock()
+        return self
+
+    def __exit__(self, *args):
+        self.end = time.clock()
+        self.interval = self.end - self.start
+
+    @staticmethod
+    def print_summary(d):
+        print('TIME SUMMARY')
+        for k, lst in d.items():
+            print('{} {}'.format(k, sum(lst)))
 
 
 class Dstore:
@@ -80,12 +105,13 @@ class Dstore:
 
 
 class KNN:
-    def __init__(self, keys, vals, indexfile=None, probe=None, k=None, sim_func=None):
+    def __init__(self, keys, vals, indexfile=None, probe=None, k=None, sim_func=None, lookup_mode='default'):
         self.keys = keys
         self.vals = vals
         self.indexfile = indexfile
         self.k = k
         self.half = False
+        self.lookup_mode = lookup_mode
         self.metric_type = 'l2'
         self.sim_func = sim_func
         self.index = self.setup_faiss()
@@ -98,6 +124,22 @@ class KNN:
         dists, knns = self.index.search(queries, self.k)
         return dists, knns
 
+    def lookup(self, keys, k, mode='default'):
+        if mode == 'default':
+            out = keys[k]
+        elif mode == 'flat':
+            out = keys[k.reshape(-1)]
+        elif mode == 'sort':
+            _k = k.reshape(-1)
+            _k.sort()
+            out = keys[_k]
+        elif mode == 'unique':
+            u, inv = np.unique(x, return_inverse=True)
+            tmp = keys[u]
+            out = tmp[inv]
+
+        return out
+
     def get_knn_log_prob(self, queries, tgt):
         def dist_func(d, k, q, function=None):
             if not function:
@@ -105,7 +147,9 @@ class KNN:
                 # Default behavior for IP metric is to return faiss distances.
                 qsize = q.shape
                 if self.metric_type == 'l2':
-                    knns_vecs = torch.from_numpy(self.keys[k]).float().cuda().view(qsize[0], self.k, -1)
+                    with Timer() as t:
+                        knns_vecs = torch.from_numpy(self.lookup(self.keys, k, self.lookup_mode)).float().cuda().view(qsize[0], self.k, -1)
+                    _global['key_lookup'].append(t.interval)
                     if self.half:
                         knns_vecs = knns_vecs.half()
                     query_vecs = q.view(qsize[0], 1, qsize[1]).repeat(1, self.k, 1)
@@ -127,13 +171,17 @@ class KNN:
         qshape = queries.shape
         queries = torch.from_numpy(queries).float().cuda().view(-1, qshape[-1])
         tgt = torch.from_numpy(tgt).long().cuda().view(-1)
-        dists, knns = self.get_knns(queries.cpu().numpy())
+        with Timer() as t:
+            dists, knns = self.get_knns(queries.cpu().numpy())
+        _global['index_search'].append(t.interval)
         # BxK
         dists = torch.from_numpy(dists).float().cuda()
         dists = dist_func(dists, knns, queries, function=self.sim_func)
         probs = torch.log_softmax(dists, dim=-1)
 
-        index_mask = torch.eq(torch.from_numpy(self.vals[knns]).long().cuda().squeeze(-1), tgt.unsqueeze(-1)).float()
+        with Timer() as t:
+            index_mask = torch.eq(torch.from_numpy(self.vals[knns]).long().cuda().squeeze(-1), tgt.unsqueeze(-1)).float()
+        _global['val_lookup'].append(t.interval)
         index_mask[index_mask == 0] = -10000 # for stability
         index_mask[index_mask == 1] = 0
 
@@ -170,10 +218,13 @@ if __name__ == '__main__':
     parser.add_argument('--probe', default=32, type=int)
     parser.add_argument('--k', default=16, type=int)
     parser.add_argument('--knn-sim-func', default=None, type=str)
+    parser.add_argument('--knn-lookup-mode', default='default', type=str)
     # Dstore
     parser.add_argument('--dstore', default='./dstore_valid', type=str)
     parser.add_argument('--dstore-size', default=217646, type=int)
     args = parser.parse_args()
+
+    print(args)
 
     with torch.no_grad():
         main(args)
