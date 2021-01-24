@@ -99,6 +99,14 @@ class SequenceScorer(object):
 
             probs = probs.view(sample['target'].shape)
 
+            extra = {}
+            extra['probs'] = probs[orig_target != self.pad].clone()
+            extra['src_tokens'] = sample['net_input']['src_tokens'][orig_target != self.pad].clone()
+            extra['target'] = orig_target[orig_target != self.pad]
+            extra['keys'] = decoder_out[1][self.args.knn_keytype][orig_target.permute(1, 0) != self.pad]
+            #d0, d1 = orig_target.shape
+            #extra['src_id'] = sample['id'].view(d0, 1).expand(d0, d1)[orig_target != self.pad].clone()
+
             if 'knn_dstore' in kwargs:
                 dstore = kwargs['knn_dstore']
                 # TxBxC
@@ -106,18 +114,12 @@ class SequenceScorer(object):
                 if len(models) != 1:
                     raise ValueError('Only knn *log* probs are supported.')
 
-                yhat_knn_prob, extra = dstore.get_knn_log_prob(
+                yhat_knn_prob, _extra = dstore.get_knn_log_prob(
                         queries,
                         orig_target.permute(1, 0),
                         pad_idx=self.pad)
-                # Add original probs.
-                extra['probs'] = probs[orig_target != self.pad].clone()
-                # Add reference data.
-                extra['src_tokens'] = sample['net_input']['src_tokens'][orig_target != self.pad].clone()
-                d0, d1 = orig_target.shape
-                extra['src_id'] = sample['id'].view(d0, 1).expand(d0, d1)[orig_target != self.pad].clone()
-                extra = self.sanitize(extra)
-                # TODO: At this point, extra should have all the required data. Write this to file.
+                for k, v in _extra.items():
+                    extra[k] = v
                 yhat_knn_prob = yhat_knn_prob.permute(1, 0, 2).squeeze(-1)
                 if self.args.fp16:
                     yhat_knn_prob = yhat_knn_prob.half()

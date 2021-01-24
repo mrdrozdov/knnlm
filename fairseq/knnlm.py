@@ -118,12 +118,12 @@ class KNN_Dstore(object):
 
         # Extra
         extra = {}
-        extra['target'] = tgt[select_mask]
-        extra['queries'] = queries[select_mask]
+        #extra['target'] = tgt[select_mask]
+        #extra['queries'] = queries[select_mask]
         extra['dists'] = dists
         extra['knns'] = torch.from_numpy(knns)
         extra['keys'] = torch.from_numpy(self.keys[knns.reshape(-1)].reshape(knns.shape[0], knns.shape[1], -1))
-        extra['vals'] = torch.from_numpy(self.vals[knns.reshape(-1)].reshape(knns.shape[0], knns.shape[1]))
+        #extra['vals'] = torch.from_numpy(self.vals[knns.reshape(-1)].reshape(knns.shape[0], knns.shape[1]))
 
         # TxBx1
         return full_yhat_knn_prob.view(qshape[0], qshape[1], 1), extra
