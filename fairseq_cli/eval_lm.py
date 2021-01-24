@@ -282,41 +282,40 @@ def main(parsed_args):
             #save_extra.append(extra)
             gen_timer.stop(sample['ntokens'])
 
+            if args.save_knnlm_dstore and not dstore_full:
+                _keys = extra['keys']
+                shape = _keys.shape
+                if shape[0] == args.tokens_per_sample or args.no_min_context:
+                    if dstore_idx + shape[0] > args.dstore_size:
+                        shape = [args.dstore_size - dstore_idx]
+                        dstore_full = True
+                    if args.dstore_fp16:
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
+                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.float16)
+                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
+                    else:
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int)
+                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.float32)
+                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int)
+
+                    dstore_idx += shape[0]
+                else:
+                    print('Skipping this one with shape', shape)
+                if dstore_full:
+                    print('Datastore is full with {} items.'.format(args.dstore_size))
+
             for i, hypos_i in enumerate(hypos):
                 hypo = hypos_i[0]
-                if args.save_knnlm_dstore and not dstore_full:
-                    _keys = hypo['dstore_keys']
-                    if args.no_min_context:
-                        _keys = extra['keys']
-                    shape = _keys.shape
-                    if shape[0] == args.tokens_per_sample or args.no_min_context:
-                        if dstore_idx + shape[0] > args.dstore_size:
-                            shape = [args.dstore_size - dstore_idx]
-                            dstore_full = True
-                        if args.dstore_fp16:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.int16)
-                            dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.float16)
-                            dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.int16)
-                        else:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.int)
-                            dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.float32)
-                            dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                                -1, 1).cpu().numpy().astype(np.int)
-
-                        dstore_idx += shape[0]
-                    else:
-                        print('Skipping this one with shape', shape)
-                    if dstore_full:
-                        print('Datastore is full with {} items.'.format(args.dstore_size))
 
                 sample_id = sample['id'][i]
 
