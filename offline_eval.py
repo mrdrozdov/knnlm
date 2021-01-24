@@ -31,6 +31,8 @@ def main(args):
                   )
         print('done.')
 
+        writer = Writer(args.save_to, args.dstore_size, args.k)
+
         coeff_lst = np.arange(20) / 20
         res = collections.defaultdict(list)
 
@@ -55,28 +57,81 @@ def main(args):
             xt[:] = dstore['tgt'][start:end]
             xp[:] = dstore['p'][start:end]
 
-            knn_p = knn.get_knn_log_prob(xq, xt)
+            knn_p, dist, knns = knn.get_knn_log_prob(xq, xt)
 
-            for coeff in coeff_lst:
-                if coeff == 0:
-                    new_p = torch.from_numpy(xp).float().cuda()
-                else:
-                    new_p = combine_knn_and_vocab_probs(
-                                knn_p,
-                                torch.from_numpy(xp).float().cuda(),
-                                coeff)
-                res[coeff].append(new_p.cpu().numpy())
+            if args.save:
+                writer.update(dist, knns)
 
-            print('iter = {}'.format(i))
+            if args.verbose:
 
-            Timer.print_summary(_global)
+                for coeff in coeff_lst:
+                    if coeff == 0:
+                        new_p = torch.from_numpy(xp).float().cuda()
+                    else:
+                        new_p = combine_knn_and_vocab_probs(
+                                    knn_p,
+                                    torch.from_numpy(xp).float().cuda(),
+                                    coeff)
+                    res[coeff].append(new_p.cpu().numpy())
 
-            print('PERPLEXITY')
-            for coeff in coeff_lst:
-                new_p = np.concatenate(res[coeff], axis=0)
-                ppl = eval_ppl(new_p)
-                print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
-            print('')
+                print('iter = {}'.format(i))
+
+                Timer.print_summary(_global)
+
+                print('PERPLEXITY')
+                for coeff in coeff_lst:
+                    new_p = np.concatenate(res[coeff], axis=0)
+                    ppl = eval_ppl(new_p)
+                    print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
+                print('')
+
+        # DONE
+        Timer.print_summary(_global)
+
+        for coeff in coeff_lst:
+            if coeff == 0:
+                new_p = torch.from_numpy(xp).float().cuda()
+            else:
+                new_p = combine_knn_and_vocab_probs(
+                            knn_p,
+                            torch.from_numpy(xp).float().cuda(),
+                            coeff)
+            res[coeff].append(new_p.cpu().numpy())
+
+        print('PERPLEXITY')
+        for coeff in coeff_lst:
+            new_p = np.concatenate(res[coeff], axis=0)
+            ppl = eval_ppl(new_p)
+            print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
+        print('')
+
+
+
+class Writer:
+    def __init__(self, path, dstore_size=None, k=None):
+        self.dstore_size = dstore_size
+        self.k = k
+        self.path = path
+        self._initialized = False
+
+    def initialize(self):
+        path, dstore_size, k = self.path, self.dstore_size, self.k
+        os.system('mkdir -p {}'.format(path))
+        self.out = {}
+        self.out['dist'] = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(dstore_size, k, 1))
+        self.out['knns'] = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='w+', shape=(dstore_size, k, 1))
+        self.offset = 0
+        self._initialized = True
+
+    def update(self, dist, knns):
+        if not self._initialized:
+            self.initialize()
+        size = dist.shape[0]
+        start = self.offset
+        end = start + size
+        self.out['dist'][start:end] = dist.reshape(size, self.k, 1)
+        self.out['knns'][start:end] = knns.reshape(size, self.k, 1)
+        self.offset += size
 
 
 class Timer:
@@ -192,7 +247,7 @@ class KNN:
         yhat_knn_prob = torch.logsumexp(probs + index_mask, dim=-1).clone()
 
         # Bx1
-        return yhat_knn_prob.view(qshape[0], 1)
+        return yhat_knn_prob.view(qshape[0], 1), dists.cpu().numpy(), knns
 
 
 def combine_knn_and_vocab_probs(knn_p, vocab_p, coeff):
@@ -219,13 +274,18 @@ if __name__ == '__main__':
     parser.add_argument('--knn-dstore', default='./checkpoints_full', type=str)
     parser.add_argument('--knn-dstore-size', default=103225485, type=int)
     parser.add_argument('--probe', default=32, type=int)
-    parser.add_argument('--k', default=16, type=int)
+    parser.add_argument('--k', default=1024, type=int)
     parser.add_argument('--knn-sim-func', default=None, type=str)
     parser.add_argument('--knn-lookup-mode', default='default', type=str)
-    parser.add_argument('--bsize', default=10000, type=int)
+    parser.add_argument('--bsize', default=100, type=int)
     # Dstore
     parser.add_argument('--dstore', default='./dstore_valid', type=str)
     parser.add_argument('--dstore-size', default=217646, type=int)
+    # Lookup
+    parser.add_argument('--save', action='store_true')
+    parser.add_argument('--save-to', default=None, type=str)
+    #
+    parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
 
     print(args)
