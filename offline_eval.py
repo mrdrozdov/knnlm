@@ -34,7 +34,7 @@ def main(args):
         coeff_lst = np.arange(20) / 20
         res = collections.defaultdict(list)
 
-        bsize = 10000
+        bsize = args.bsize
         dsize = dstore['vec'].shape[0]
         nbatches = dsize // bsize
         if nbatches * bsize < dsize:
@@ -58,10 +58,13 @@ def main(args):
             knn_p = knn.get_knn_log_prob(xq, xt)
 
             for coeff in coeff_lst:
-                new_p = combine_knn_and_vocab_probs(
-                            knn_p,
-                            torch.from_numpy(xp).float().cuda(),
-                            coeff)
+                if coeff == 0:
+                    new_p = torch.from_numpy(xp).float().cuda()
+                else:
+                    new_p = combine_knn_and_vocab_probs(
+                                knn_p,
+                                torch.from_numpy(xp).float().cuda(),
+                                coeff)
                 res[coeff].append(new_p.cpu().numpy())
 
             print('iter = {}'.format(i))
@@ -134,7 +137,7 @@ class KNN:
             _k.sort()
             out = keys[_k]
         elif mode == 'unique':
-            u, inv = np.unique(x, return_inverse=True)
+            u, inv = np.unique(k, return_inverse=True)
             tmp = keys[u]
             out = tmp[inv]
 
@@ -219,6 +222,7 @@ if __name__ == '__main__':
     parser.add_argument('--k', default=16, type=int)
     parser.add_argument('--knn-sim-func', default=None, type=str)
     parser.add_argument('--knn-lookup-mode', default='default', type=str)
+    parser.add_argument('--bsize', default=10000, type=int)
     # Dstore
     parser.add_argument('--dstore', default='./dstore_valid', type=str)
     parser.add_argument('--dstore-size', default=217646, type=int)
