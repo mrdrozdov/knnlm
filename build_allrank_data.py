@@ -14,7 +14,7 @@ def main(args):
 
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
-    dstore.add_neighbors(args.lookup, args.lookup_k)
+    dstore.add_neighbors(args.lookup, args.lookup_k, sparse=args.lookup_sparse)
 
     reduce_func = ReduceDimensions(args)
 
@@ -22,6 +22,9 @@ def main(args):
 
     # get splits
     index = np.arange(dsize)
+    if args.lookup_sparse:
+        sparse_mask = dstore.lookup_done[:].reshape(-1) == 1
+        index = index[sparse_mask]
     np.random.shuffle(index)
 
     splits = [
@@ -53,7 +56,7 @@ def main(args):
 
         del tgts
         del knn_tgts
-        del knns
+        #del knns
 
         # get optimal order
 
@@ -79,10 +82,15 @@ def main(args):
 
         label = np.take_along_axis(label, new_order, axis=1)
         feat = np.take_along_axis(feat, new_order, axis=1)
+        knns = np.take_along_axis(knns, new_order, axis=1)
         feat = reduce_func(feat)
 
-        print('writing {} with feat shape {}'.format(path, feat.shape))
-        write_allrank_data(path, qids, label, feat)
+        if args.feat_idx:
+            print('writing {} with feat_idx shape {}'.format(path, knns.shape))
+            write_allrank_data(path, qids, label, None, feat_idx=knns)
+        else:
+            print('writing {} with feat shape {}'.format(path, feat.shape))
+            write_allrank_data(path, qids, label, feat)
 
 
 class ReduceDimensions:
@@ -106,15 +114,19 @@ def format_vec(vec):
     return ' '.join(['{}:{:.4f}'.format(i, x) for i, x in enumerate(vec)])
 
 
-def write_allrank_data(path, qids, label, feat):
+def write_allrank_data(path, qids, label, feat, feat_idx=None):
     size, k, _ = label.shape
     with open(path, 'w') as f:
         for i_slate in range(size):
             for i_k in range(k):
-                q = qids[i_slate]
-                y = label[i_slate, i_k, 0]
-                vec = format_vec(feat[i_slate, i_k])
-                f.write('{} qid:{} {}'.format(y, q, vec))
+                q = int(qids[i_slate])
+                y = int(label[i_slate, i_k, 0])
+                if feat_idx is None:
+                    val = format_vec(feat[i_slate, i_k])
+                    f.write('{} qid:{} {}'.format(y, q, val))
+                else:
+                    val = int(feat_idx[i_slate, i_k, 0])
+                    f.write('{} qid:{} 0:{}'.format(y, q, val))
                 f.write('\n')
 
 
@@ -133,9 +145,11 @@ class Dstore:
         self.prob = np.memmap(os.path.join(path, 'dstore_prob.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, 1))
         self._initialized = True
 
-    def add_neighbors(self, path, k):
+    def add_neighbors(self, path, k, sparse=False):
         self.knns = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
         self.dist = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
+        if sparse:
+            self.lookup_done = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
 
 if __name__ == '__main__':
@@ -146,12 +160,14 @@ if __name__ == '__main__':
     # dstore neighbors
     parser.add_argument('--lookup', default='lookup_train', type=str)
     parser.add_argument('--lookup-k', default=128, type=int)
+    parser.add_argument('--lookup-sparse', action='store_true')
     # allrank
     parser.add_argument('--output', default=None, type=str)
     parser.add_argument('--ntrain', default=1000, type=int)
     parser.add_argument('--nvalid', default=100, type=int)
     parser.add_argument('--seed', default=121, type=int)
     parser.add_argument('--k', default=128, type=int)
+    parser.add_argument('--feat-idx', action='store_true')
     parser.add_argument('--quant', action='store_true')
     args = parser.parse_args()
 

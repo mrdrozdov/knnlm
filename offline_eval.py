@@ -44,7 +44,19 @@ def main(args):
 
         new_p_lst = []
 
+        # Build should do.
+        should_do_lst = np.ones(nbatches)
+        if args.ndownsample is not None:
+            should_do_lst[:] = 0
+            should_do_lst[:args.ndownsample] = 1
+            np.random.shuffle(should_do_lst)
+
+        should_do_lst = should_do_lst == 1
+
         for i in tqdm(range(nbatches)):
+            should_do = should_do_lst[i]
+            if not should_do:
+                continue
             start = i * bsize
             end = min(start + bsize, dsize)
             size = end - start
@@ -60,10 +72,9 @@ def main(args):
             knn_p, dist, knns = knn.get_knn_log_prob(xq, xt)
 
             if args.save:
-                writer.update(dist, knns)
+                writer.update(dist, knns, start)
 
             if args.verbose:
-
                 for coeff in coeff_lst:
                     if coeff == 0:
                         new_p = torch.from_numpy(xp).float().cuda()
@@ -115,23 +126,26 @@ class Writer:
         self._initialized = False
 
     def initialize(self):
+        print('Init writer...')
         path, dstore_size, k = self.path, self.dstore_size, self.k
         os.system('mkdir -p {}'.format(path))
         self.out = {}
         self.out['dist'] = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(dstore_size, k, 1))
         self.out['knns'] = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='w+', shape=(dstore_size, k, 1))
-        self.offset = 0
+        self.out['done'] = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='w+', shape=(dstore_size, 1))
+        self.out['done'][:] = 0 # defaults to 0
         self._initialized = True
+        print('done.')
 
-    def update(self, dist, knns):
+    def update(self, dist, knns, offset):
         if not self._initialized:
             self.initialize()
         size = dist.shape[0]
-        start = self.offset
+        start = offset
         end = start + size
         self.out['dist'][start:end] = dist.reshape(size, self.k, 1)
         self.out['knns'][start:end] = knns.reshape(size, self.k, 1)
-        self.offset += size
+        self.out['done'][start:end] = 1
 
 
 class Timer:
@@ -278,6 +292,7 @@ if __name__ == '__main__':
     parser.add_argument('--knn-sim-func', default=None, type=str)
     parser.add_argument('--knn-lookup-mode', default='default', type=str)
     parser.add_argument('--bsize', default=100, type=int)
+    parser.add_argument('--ndownsample', default=None, type=int)
     # Dstore
     parser.add_argument('--dstore', default='./dstore_valid', type=str)
     parser.add_argument('--dstore-size', default=217646, type=int)
