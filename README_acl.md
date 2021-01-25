@@ -110,6 +110,8 @@ python build_allrank_data.py --quant \
     --k 128
 ```
 
+The file this creates is roughly 20GB.
+
 # Step 5. Create the config for allrank.
 
 There are some key values to modify.
