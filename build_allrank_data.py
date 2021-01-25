@@ -21,10 +21,12 @@ def main(args):
     dsize = dstore.keys.shape[0]
 
     # get splits
+    print('dsize = {}'.format(dsize))
     index = np.arange(dsize)
     if args.lookup_sparse:
         sparse_mask = dstore.lookup_done[:].reshape(-1) == 1
         index = index[sparse_mask]
+        print('new sparse dsize = {}'.format(index.shape[0]))
     np.random.shuffle(index)
 
     splits = [
@@ -35,30 +37,83 @@ def main(args):
     print('mkdir -p {}'.format(args.output))
     os.system('mkdir -p {}'.format(args.output))
 
+    def _copy(x, dtype=np.float32):
+        o = np.zeros(x.shape)
+        o = x[:]
+        o = o.astype(dtype)
+        return o
+
+    def batched_load(d, k, bsz=100, dim=1024):
+        n = k.shape[0]
+        nbatches = n // bsz
+        if nbatches * bsz < n:
+            nbatches += 1
+        out = []
+        for i in tqdm(range(nbatches)):
+            start = i * bsz
+            end = min(start + bsz, n)
+            size = end - start
+            local_k = k[start:end]
+
+            v = _copy(d[local_k], dtype=np.float32)
+
+            out.append(v)
+        return np.concatenate(out, axis=0)
+
+
     offset = 0
     for name, size in splits:
+        print('start {} {} {}'.format(name, offset, size))
         path = os.path.join(args.output, '{}.txt'.format(name))
         local_index = index[offset:offset+size]
-        tgts = dstore.tgts[local_index]
-        knns = dstore.knns[local_index][:, :args.k]
+        offset += size
+        print('load tgt')
+        tgts = _copy(dstore.tgts[local_index][:], dtype=np.int)
+        print('load knns')
+        knns = _copy(dstore.knns[local_index][:, 1:args.k + 1], dtype=np.int)
         # dist is sorted from hi to lo
-        dist = dstore.dist[local_index][:, :args.k]
-        knn_tgts = dstore.tgts[knns.reshape(-1)].reshape(size, args.k, 1)
+        print('load dist')
+        dist = _copy(dstore.dist[local_index][:, 1:args.k + 1], dtype=np.float32)
+        print('load knn-tgt')
+        knn_tgts = _copy(dstore.tgts[knns.reshape(-1)].reshape(size, args.k, 1), dtype=np.int)
 
         # get qids
         qids = local_index
 
         # get features
-        feat = dstore.keys[knns.reshape(-1)].reshape(size, args.k, -1)
+        print('load feats')
+        u, inv = np.unique(knns, return_inverse=True)
+        tmp = batched_load(dstore.keys, u, bsz=1000)
+        #tmp = dstore.keys[u][:]
+        feat = tmp[inv].reshape(size, args.k, dstore.vec_size)
+        #feat = dstore.keys[knns.reshape(-1)].reshape(size, args.k, -1)[:]
 
         # get label
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
+
+        # count stats
+        has_positive = label.reshape(size, args.k).sum(axis=1) > 0
+        has_negative = label.reshape(size, args.k).sum(axis=1) < args.k
+        has_both = np.logical_and(has_positive, has_negative)
+        print('has_positive = {} / {}'.format(np.sum(has_positive), size))
+        print('has_negative = {} / {}'.format(np.sum(has_negative), size))
+        print('has_both = {} / {}'.format(np.sum(has_both), size))
 
         del tgts
         del knn_tgts
         #del knns
 
+        qids = qids[has_both]
+        dist = dist[has_both]
+        label = label[has_both]
+        feat = feat[has_both]
+        knns = knns[has_both]
+
+        size = label.shape[0]
+
+
         # get optimal order
+        print('get optimal order')
 
         ## positives - sort from hi to lo
         positive_dist = dist.copy()
@@ -80,6 +135,7 @@ def main(args):
 
         assert np.all(np.unique(new_order, return_counts=True)[1] == size)
 
+        print('re-order')
         label = np.take_along_axis(label, new_order, axis=1)
         feat = np.take_along_axis(feat, new_order, axis=1)
         knns = np.take_along_axis(knns, new_order, axis=1)
@@ -172,6 +228,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     print(args)
+
+    assert args.k < args.lookup_k, "First neighbor is always thrown away."
 
     main(args)
 
