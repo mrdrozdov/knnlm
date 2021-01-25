@@ -26,7 +26,7 @@ def main(args):
 
     splits = [
         ('train', args.ntrain),
-        ('valid', args.nvalid),
+        ('vali', args.nvalid),
     ]
 
     print('mkdir -p {}'.format(args.output))
@@ -34,7 +34,7 @@ def main(args):
 
     offset = 0
     for name, size in splits:
-        path = os.path.join(args.output, 'allrank_{}.txt'.format(name))
+        path = os.path.join(args.output, '{}.txt'.format(name))
         local_index = index[offset:offset+size]
         tgts = dstore.tgts[local_index]
         knns = dstore.knns[local_index][:, :args.k]
