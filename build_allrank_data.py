@@ -2,6 +2,8 @@ import argparse
 import collections
 import os
 
+import faiss
+
 import numpy as np
 
 from tqdm import tqdm
@@ -13,6 +15,8 @@ def main(args):
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
+
+    reduce_func = ReduceDimensions(args)
 
     dsize = dstore.keys.shape[0]
 
@@ -42,7 +46,7 @@ def main(args):
         qids = local_index
 
         # get features
-        feat = dstore.keys[knns.reshape(-1)].reshape(size, args.k, dstore.vec_size)
+        feat = dstore.keys[knns.reshape(-1)].reshape(size, args.k, -1)
 
         # get label
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
@@ -73,9 +77,24 @@ def main(args):
 
         label = np.take_along_axis(label, new_order, axis=1)
         feat = np.take_along_axis(feat, new_order, axis=1)
+        feat = reduce_func(feat)
 
         print('writing {} with feat shape {}'.format(path, feat.shape))
         write_allrank_data(path, qids, label, feat)
+
+
+class ReduceDimensions:
+    def __init__(self, args):
+        self.enabled = args.quant
+        self.index = faiss.read_index(os.path.join(args.dstore, 'knn.index.trained'))
+
+    def __call__(self, vecs):
+        if not self.enabled:
+            return vecs
+        raise Exception('Do not do this! Product vectors are too much like categorical features.')
+        b, k, d = vecs.shape
+        new_vecs = self.index.pq.compute_codes(vecs.reshape(b * k, d)) / 255
+        return new_vecs.reshape(b, k, -1)
 
 
 def format_vec(vec):
