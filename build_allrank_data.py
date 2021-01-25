@@ -60,18 +60,20 @@ def main(args):
         ## positives - sort from hi to lo
         positive_dist = dist.copy()
         positive_dist[label == 0] = -np.inf
+        positive_dist_sorted = np.sort(positive_dist, axis=1)[:, ::-1]
         positive_order = positive_dist.argsort(axis=1)[:, ::-1]
 
         ## negatives - sort from lo to hi
         negative_dist = dist.copy()
         negative_dist[label == 1] = -np.inf
+        negative_dist_sorted = np.sort(negative_dist, axis=1)
         negative_order = negative_dist.argsort(axis=1)
 
         new_order = np.zeros((size, args.k, 1)).astype(np.int)
         # set positives
-        new_order[positive_dist > -np.inf] = positive_order[positive_dist > -np.inf]
+        new_order[positive_dist_sorted > -np.inf] = positive_order[positive_dist_sorted > -np.inf]
         # set negatives
-        new_order[negative_dist > -np.inf] = negative_order[negative_dist > -np.inf]
+        new_order[negative_dist_sorted > -np.inf] = negative_order[negative_dist_sorted > -np.inf]
 
         assert np.all(np.unique(new_order, return_counts=True)[1] == size)
 
