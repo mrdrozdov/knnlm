@@ -8,9 +8,11 @@
 Evaluate the perplexity of a trained language model.
 """
 
+import collections
 import logging
 import math
 import os
+import json
 
 import torch
 import numpy as np
@@ -28,6 +30,89 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger('fairseq_cli.eval_lm')
+
+
+def invert(lst):
+    d = collections.defaultdict(list)
+    for x in lst:
+        for k, v in x.items():
+            d[k].append(v)
+    return d
+
+
+class Writer:
+    def __init__(self, outdir, max_size=-1, k=-1, vec_size=1024):
+        # TODO: Write metadata. Should record last offset.
+        self.outdir = os.path.abspath(outdir)
+        self.initialized = False
+        self.done = False
+        self.fp = {}
+        self.dtypes= {
+                'target': [max_size],
+                'queries': [max_size, vec_size],
+                'dists': [max_size, k],
+                'knns': [max_size, k],
+                'keys': [max_size, k, vec_size],
+                'vals': [max_size, k],
+                'probs': [max_size],
+        }
+        self.max_size = max_size
+        self.k = k
+        self.vec_size = vec_size
+        self.offset = 0
+
+    def initialize(self):
+        print('Initializing...')
+        # Make directory.
+        outdir = self.outdir
+        try:
+            os.system('mkdir -p {}'.format(outdir))
+        except:
+            pass
+
+        # Open arrays.
+        for k, shape in self.dtypes.items():
+            shape = tuple(shape)
+            outfile = os.path.join(outdir, '{}.npy'.format(k))
+            self.fp[k] = np.memmap(outfile, dtype=np.float, mode='w+', shape=shape)
+
+        self.initialized = True
+
+    def update(self, o):
+        if not self.initialized:
+            self.initialize()
+        if self.done:
+            return
+        offset = self.offset
+        size = None
+        for k in self.dtypes.keys():
+            v = o[k]
+            m = self.fp[k]
+            if size is None:
+                size = v.shape[0]
+                if self.offset + size > self.max_size:
+                    size = self.max_size - self.offset
+            m[offset:offset+size] = v[:size]
+        self.offset += size
+        if self.offset >= self.max_size:
+            self.done = True
+            print('Done! Filled reference data with {} items.'.format(self.offset))
+
+    def close(self):
+        # TODO
+        raise NotImplementedError
+
+
+def collate(save_extra):
+    def helper(extra_lst):
+        new_extra = collections.defaultdict(list)
+        for extra in extra_lst:
+            for k, v in extra.items():
+                new_extra[k].append(v)
+        for k, v in new_extra.items():
+            new_extra[k] = np.concatenate(v, 0)
+        return new_extra
+    return helper(save_extra)
 
 
 class WordStat(object):
@@ -58,6 +143,13 @@ class WordStat(object):
 
 def main(parsed_args):
     assert parsed_args.path is not None, '--path required for evaluation!'
+
+    if parsed_args.dstore_mmap is not None:
+        d = os.path.dirname(parsed_args.dstore_mmap)
+        print('mmap from {}'.format(d))
+        if not os.path.exists(d):
+            print('making dir')
+            os.system('mkdir -p {}'.format(d))
 
     utils.import_user_module(parsed_args)
 
@@ -122,6 +214,7 @@ def main(parsed_args):
         shard_id=args.shard_id,
         num_workers=args.num_workers,
     ).next_epoch_itr(shuffle=False)
+    #).next_epoch_itr(shuffle=True)
 
     gen_timer = StopwatchMeter()
     scorer = SequenceScorer(task.target_dictionary, args.softmax_batch, args=args)
@@ -160,13 +253,21 @@ def main(parsed_args):
             if args.dstore_fp16:
                 print('Saving fp16')
                 dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
+                dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, 1))
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
+                dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
             else:
                 print('Saving fp32')
                 dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
+                dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, 1))
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
+                dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
+
+        if args.save_extra:
+            writer = Writer(outdir='demo-out', max_size=args.save_extra_max_size, k=args.k, vec_size=1024)
 
         dstore_idx = 0
+        dstore_full = False
         for ex_i, sample in enumerate(t):
             if 'net_input' not in sample:
                 continue
@@ -175,33 +276,46 @@ def main(parsed_args):
 
             gen_timer.start()
             if args.knnlm:
-                hypos = scorer.generate(models, sample, knn_dstore=knn_dstore)
+                hypos, extra = scorer.generate(models, sample, knn_dstore=knn_dstore)
             else:
-                hypos = scorer.generate(models, sample)
+                hypos, extra = scorer.generate(models, sample)
+            #save_extra.append(extra)
             gen_timer.stop(sample['ntokens'])
+
+            if args.save_knnlm_dstore and not dstore_full:
+                _keys = extra['keys']
+                shape = _keys.shape
+                if shape[0] == len(hypos) * args.tokens_per_sample or args.no_min_context:
+                    if dstore_idx + shape[0] > args.dstore_size:
+                        shape = [args.dstore_size - dstore_idx]
+                        dstore_full = True
+                    if args.dstore_fp16:
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
+                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.float16)
+                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
+                    else:
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int)
+                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.float32)
+                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int)
+
+                    dstore_idx += shape[0]
+                else:
+                    print('Skipping this one with shape', shape)
+                if dstore_full:
+                    print('Datastore is full with {} items.'.format(args.dstore_size))
 
             for i, hypos_i in enumerate(hypos):
                 hypo = hypos_i[0]
-                if args.save_knnlm_dstore:
-                    shape = hypo['dstore_keys'].shape
-                    if shape[0] == args.tokens_per_sample:
-                        if dstore_idx + shape[0] > args.dstore_size:
-                            shape = [args.dstore_size - dstore_idx]
-                            hypo['dstore_keys'] = hypo['dstore_keys'][:shape[0]]
-                        if args.dstore_fp16:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int16)
-                        else:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int)
-
-                        dstore_idx += shape[0]
-                    else:
-                        print('Skipping this one with shape', shape)
 
                 sample_id = sample['id'][i]
 
@@ -264,6 +378,10 @@ def main(parsed_args):
 
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})
+
+            # Write saved values to disk.
+            if args.save_extra:
+                writer.update(extra)
 
     if args.save_knnlm_dstore:
         print("dstore_idx", dstore_idx, "final shape", shape)

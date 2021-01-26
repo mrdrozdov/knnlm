@@ -7,6 +7,7 @@ import torch
 import sys
 import numpy as np
 import time
+import collections
 
 from fairseq import utils
 from fairseq.data import Dictionary
@@ -22,6 +23,11 @@ class SequenceScorer(object):
         assert self.softmax_batch > 0
         self.compute_alignment = compute_alignment
         self.args = args
+
+    def sanitize(self, extra):
+        for k, v in extra.items():
+            extra[k] = v.detach().cpu().float().numpy()
+        return extra
 
     @torch.no_grad()
     def generate(self, models, sample, **kwargs):
@@ -64,7 +70,9 @@ class SequenceScorer(object):
         # compute scores for each model in the ensemble
         avg_probs = None
         avg_attn = None
-        for model in models:
+        extra = None
+        for i_model, model in enumerate(models):
+            assert extra is None
             model.eval()
             decoder_out = model(**net_input)
             attn = decoder_out[1]
@@ -91,6 +99,14 @@ class SequenceScorer(object):
 
             probs = probs.view(sample['target'].shape)
 
+            extra = {}
+            extra['probs'] = probs[orig_target != self.pad].clone()
+            extra['src_tokens'] = sample['net_input']['src_tokens'][orig_target != self.pad].clone()
+            extra['target'] = orig_target[orig_target != self.pad]
+            extra['keys'] = decoder_out[1][self.args.knn_keytype].permute(1, 0, 2)[orig_target != self.pad]
+            #d0, d1 = orig_target.shape
+            #extra['src_id'] = sample['id'].view(d0, 1).expand(d0, d1)[orig_target != self.pad].clone()
+
             if 'knn_dstore' in kwargs:
                 dstore = kwargs['knn_dstore']
                 # TxBxC
@@ -98,10 +114,12 @@ class SequenceScorer(object):
                 if len(models) != 1:
                     raise ValueError('Only knn *log* probs are supported.')
 
-                yhat_knn_prob = dstore.get_knn_log_prob(
+                yhat_knn_prob, _extra = dstore.get_knn_log_prob(
                         queries,
                         orig_target.permute(1, 0),
                         pad_idx=self.pad)
+                for k, v in _extra.items():
+                    extra[k] = v
                 yhat_knn_prob = yhat_knn_prob.permute(1, 0, 2).squeeze(-1)
                 if self.args.fp16:
                     yhat_knn_prob = yhat_knn_prob.half()
@@ -125,6 +143,9 @@ class SequenceScorer(object):
             avg_probs.log_()
             if avg_attn is not None:
                 avg_attn.div_(len(models))
+
+        # save_extra = self.collate(save_extra)
+        # TODO: This needs to be written to file.
 
         bsz = avg_probs.size(0)
         hypos = []
@@ -158,4 +179,5 @@ class SequenceScorer(object):
                 'positional_scores': avg_probs_i,
                 'dstore_keys': decoder_out[1][self.args.knn_keytype][start_idxs[i]:,i,:] if self.args.save_knnlm_dstore else None,
             }])
-        return hypos
+        return hypos, extra
+
