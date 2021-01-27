@@ -256,12 +256,14 @@ def main(parsed_args):
                 dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, 1))
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
                 dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
+                dstore_src = np.memmap(args.dstore_mmap+'_src.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
             else:
                 print('Saving fp32')
                 dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
                 dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, 1))
                 dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
                 dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
+                dstore_src = np.memmap(args.dstore_mmap+'_src.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
 
         if args.save_extra:
             writer = Writer(outdir='demo-out', max_size=args.save_extra_max_size, k=args.k, vec_size=1024)
@@ -292,20 +294,24 @@ def main(parsed_args):
                     if args.dstore_fp16:
                         dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
                             -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.int16)
                         dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.float16)
                         dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.int16)
+                        dstore_src[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
                     else:
                         dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
                             -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.int)
                         dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.float32)
                         dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
+                            -1, 1).cpu().numpy().astype(np.int)
+                        dstore_src[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
                             -1, 1).cpu().numpy().astype(np.int)
 
                     dstore_idx += shape[0]

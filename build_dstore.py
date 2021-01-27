@@ -4,6 +4,8 @@ import numpy as np
 import faiss
 import time
 
+from tqdm import tqdm
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dstore_mmap', type=str, help='memmap where keys and vals are stored')
@@ -29,19 +31,42 @@ else:
     keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='r', shape=(args.dstore_size, args.dimension))
     vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='r', shape=(args.dstore_size, 1))
 
+def load_keys(keys, index):
+    index = index.copy()
+    index.sort()
+    bsz = 1000
+    nbatches = index.shape[0] // bsz
+    if nbatches * bsz < index.shape[0]:
+        nbatches += 1
+    out = []
+    for i in tqdm(range(nbatches)):
+        start = i * bsz
+        end = min(start + bsz, index.shape[0])
+        b = keys[index[start:end]].astype(np.float32)
+        out.append(b)
+    out = np.concatenate(out, axis=0)
+    index = np.arange(out.shape[0])
+    np.random.shuffle(index)
+    return out[index]
+
 if not os.path.exists(args.faiss_index+".trained"):
     # Initialize faiss index
     quantizer = faiss.IndexFlatL2(args.dimension)
     index = faiss.IndexIVFPQ(quantizer, args.dimension,
         args.ncentroids, args.code_size, 8)
     index.nprobe = args.probe
+    index.verbose = True
 
     print('Training Index')
     np.random.seed(args.seed)
+    print('Sample Index')
     random_sample = np.random.choice(np.arange(vals.shape[0]), size=[min(1000000, vals.shape[0])], replace=False)
     start = time.time()
     # Faiss does not handle adding keys in fp16 as of writing this.
-    index.train(keys[random_sample].astype(np.float32))
+    print('Load Keys')
+    k = load_keys(keys, random_sample)
+    print('Train')
+    index.train(k)
     print('Training took {} s'.format(time.time() - start))
 
     print('Writing index after training')

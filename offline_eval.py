@@ -22,7 +22,7 @@ def main(args):
         knn_dstore = Dstore.read(args.knn_dstore, args.knn_dstore_size, legacy=args.knn_legacy)
         indexfile = os.path.join(args.knn_dstore, 'knn.index')
         print('Build KNN...')
-        knn = KNN(knn_dstore['vec'], knn_dstore['src'],
+        knn = KNN(knn_dstore['vec'], knn_dstore['val'],
                   indexfile=indexfile,
                   probe=args.probe,
                   k=args.k,
@@ -33,8 +33,6 @@ def main(args):
 
         writer = Writer(args.save_to, args.dstore_size, args.k)
 
-        coeff_lst = np.arange(20) / 20
-        res = collections.defaultdict(list)
 
         bsize = args.bsize
         dsize = dstore['vec'].shape[0]
@@ -53,9 +51,11 @@ def main(args):
 
         should_do_lst = should_do_lst == 1
 
+        out = collections.defaultdict(list)
         for i in tqdm(range(nbatches)):
             should_do = should_do_lst[i]
             if not should_do:
+                print('skip {}'.format(i))
                 continue
             start = i * bsize
             end = min(start + bsize, dsize)
@@ -74,46 +74,32 @@ def main(args):
             if args.save:
                 writer.update(dist, knns, start)
 
-            if args.verbose:
-                for coeff in coeff_lst:
-                    if coeff == 0:
-                        new_p = torch.from_numpy(xp).float().cuda()
-                    else:
-                        new_p = combine_knn_and_vocab_probs(
-                                    knn_p,
-                                    torch.from_numpy(xp).float().cuda(),
-                                    coeff)
-                    res[coeff].append(new_p.cpu().numpy())
-
-                print('iter = {}'.format(i))
-
-                Timer.print_summary(_global)
-
-                print('PERPLEXITY')
-                for coeff in coeff_lst:
-                    new_p = np.concatenate(res[coeff], axis=0)
-                    ppl = eval_ppl(new_p)
-                    print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
-                print('')
+            out['p'].append(xp)
+            out['knn_p'].append(knn_p)
+            out['dist'].append(dist)
 
         # DONE
         Timer.print_summary(_global)
 
+        for k in list(out.keys()):
+            out[k] = np.concatenate(out[k], axis=0)
+
+        print('PERPLEXITY')
+        p, knn_p, dist = [out[k] for k in ['p', 'knn_p', 'dist']]
+        p = torch.from_numpy(p).float().cuda()
+        knn_p = torch.from_numpy(knn_p).float().cuda()
+        coeff_lst = np.arange(20) / 20
         for coeff in coeff_lst:
             if coeff == 0:
-                new_p = torch.from_numpy(xp).float().cuda()
+                new_p = p
             else:
                 new_p = combine_knn_and_vocab_probs(
                             knn_p,
-                            torch.from_numpy(xp).float().cuda(),
+                            p,
                             coeff)
-            res[coeff].append(new_p.cpu().numpy())
-
-        print('PERPLEXITY')
-        for coeff in coeff_lst:
-            new_p = np.concatenate(res[coeff], axis=0)
             ppl = eval_ppl(new_p)
             print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
+
         print('')
 
 
@@ -169,10 +155,10 @@ class Dstore:
     def read(path, dstore_size, vec_size=1024, legacy=False):
         dstore = {}
         dstore['vec'] = np.memmap(os.path.join(path, 'dstore_keys.npy'), dtype=np.float32, mode='r', shape=(dstore_size, vec_size))
-        dstore['src'] = np.memmap(os.path.join(path, 'dstore_vals.npy'), dtype=np.int, mode='r', shape=(dstore_size, 1))
-        if not legacy:
-            dstore['p'] = np.memmap(os.path.join(path, 'dstore_prob.npy'), dtype=np.float32, mode='r', shape=(dstore_size, 1))
-            dstore['tgt'] = np.memmap(os.path.join(path, 'dstore_tgts.npy'), dtype=np.int, mode='r', shape=(dstore_size, 1))
+        dstore['val'] = np.memmap(os.path.join(path, 'dstore_vals.npy'), dtype=np.int, mode='r', shape=(dstore_size, 1))
+        dstore['src'] = np.memmap(os.path.join(path, 'dstore_src.npy'), dtype=np.int, mode='r', shape=(dstore_size, 1))
+        dstore['p'] = np.memmap(os.path.join(path, 'dstore_prob.npy'), dtype=np.float32, mode='r', shape=(dstore_size, 1))
+        dstore['tgt'] = np.memmap(os.path.join(path, 'dstore_tgts.npy'), dtype=np.int, mode='r', shape=(dstore_size, 1))
         return dstore
 
 
@@ -258,10 +244,10 @@ class KNN:
         index_mask[index_mask == 1] = 0
 
         # (T_reducedxB)
-        yhat_knn_prob = torch.logsumexp(probs + index_mask, dim=-1).clone()
+        yhat_knn_prob = torch.logsumexp(probs + index_mask, dim=-1).clone().cpu().numpy()
 
         # Bx1
-        return yhat_knn_prob.view(qshape[0], 1), dists.cpu().numpy(), knns
+        return yhat_knn_prob.reshape(qshape[0], 1), dists.cpu().numpy(), knns
 
 
 def combine_knn_and_vocab_probs(knn_p, vocab_p, coeff):
