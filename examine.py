@@ -18,6 +18,7 @@ There are a few important sets of datastructures:
     lookup - This is a cache of retrieved neighbors on a subset of the dstore.
 
         * lookup_knns.npy - The retrieved neighbors. NxKx1
+        * lookup_knn_tgts.npy - The values of retrieved neighbors. NxKx1
         * lookup_dist.npy - The approximate distance determined by product quantization and faiss. NxKx1
         * lookup_done.npy - We only compute `knns` and `dist` for a subset of the data, and we can use `done` to keep track
             of which rows we did this for. If `done` is 1, then the row has been computed, and 0 otherwise. Nx1
@@ -46,16 +47,16 @@ def main(args):
     print('loading targets. this may take a few minutes')
     tgts = dstore.tgts[done_mask][:]
     print('loading knns. this may take a few minutes')
-    knns = dstore.knns[done_mask][:, :args.k+1]
-    knns0_tgt = dstore.tgts[knns[:, 0].reshape(-1)]
-    first_neighbor_is_tgt = tgts == knns0_tgt
+    knn_tgts = dstore.knn_tgts[done_mask][:, :args.k]
+    first_neighbor_is_tgt = tgts == knn_tgts[:, 0]
     print('{} / {} rows have first neighbor as target'.format(first_neighbor_is_tgt.sum(), tgts.shape[0]))
     print('Note: This could be less than 100% because approximate distance is used.')
     print('')
 
     # throwaway first neighbor because it is usually the identity
-    knns = knns[:, 1:]
-    knn_tgts = dstore.tgts[knns.reshape(-1)].reshape(ndone, args.k, 1)[:]
+    if args.skip_first:
+        knn_tgts = knn_tgts[:, 1:]
+        args.k -= 1
 
     # binary label indicating the knn target matches the original target
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
@@ -110,6 +111,7 @@ class Dstore:
 
     def add_neighbors(self, path, k):
         self.knns = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
+        self.knn_tgts = np.memmap(os.path.join(path, 'lookup_knn_tgts.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
         self.dist = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
         self.lookup_done = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
@@ -298,14 +300,19 @@ if __name__ == '__main__':
     parser.add_argument('--dstore', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/dstore_train', type=str)
     parser.add_argument('--dstore-size', default=103225485, type=int)
     parser.add_argument('--vocab', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/data-bin/wikitext-103/dict.txt')
+    # knn-dstore
+    parser.add_argument('--knn-dstore', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/dstore_train', type=str)
+    parser.add_argument('--knn-dstore-size', default=103225485, type=int)
     # dstore neighbors
     parser.add_argument('--lookup', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/lookup_train', type=str)
     parser.add_argument('--lookup-k', default=64, type=int)
     # examine
     parser.add_argument('--k', default=16, type=int)
+    parser.add_argument('--skip_first', action='store_true',
+                        help='If set to true, throwaway first neighbor which can be the identity.')
     args = parser.parse_args()
 
-    assert args.k < args.lookup_k, "The first neighbor is usually the identity and is thrown away."
+    #assert args.k < args.lookup_k, "The first neighbor is usually the identity and is thrown away."
 
     print(args)
 

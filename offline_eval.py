@@ -72,7 +72,8 @@ def main(args):
             knn_p, dist, knns = knn.get_knn_log_prob(xq, xt)
 
             if args.save:
-                writer.update(dist, knns, start)
+                knn_tgts = knn_dstore['tgt'][knns.reshape(-1)].reshape(size, args.k, 1)[:]
+                writer.update(dist, knns, knn_tgts, start)
 
             out['p'].append(xp)
             out['knn_p'].append(knn_p)
@@ -118,12 +119,13 @@ class Writer:
         self.out = {}
         self.out['dist'] = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(dstore_size, k, 1))
         self.out['knns'] = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='w+', shape=(dstore_size, k, 1))
+        self.out['knn_tgts'] = np.memmap(os.path.join(path, 'lookup_knn_tgts.npy'), dtype=np.int, mode='w+', shape=(dstore_size, k, 1))
         self.out['done'] = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='w+', shape=(dstore_size, 1))
         self.out['done'][:] = 0 # defaults to 0
         self._initialized = True
         print('done.')
 
-    def update(self, dist, knns, offset):
+    def update(self, dist, knns, knn_tgts, offset):
         if not self._initialized:
             self.initialize()
         size = dist.shape[0]
@@ -131,6 +133,7 @@ class Writer:
         end = start + size
         self.out['dist'][start:end] = dist.reshape(size, self.k, 1)
         self.out['knns'][start:end] = knns.reshape(size, self.k, 1)
+        self.out['knn_tgts'][start:end] = knn_tgts.reshape(size, self.k, 1)
         self.out['done'][start:end] = 1
 
 
