@@ -103,34 +103,93 @@ def main(args):
         ppl = EvalUtil.eval_ppl(new_p)
         print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
 
-    print('With Optimal Order')
-    optimal_order = Rerank.optimal_order(label, dist)
 
-    lim_lst = np.arange(args.k // 4)
+    if args.optimal_2:
 
-    with open('coeff_lim_tradeoff.txt', 'w') as f:
-        f.write('k lim coeff ppl\n')
-        for lim in lim_lst[1:-1]:
-            lim = lim * 4
-            dist_ = np.take_along_axis(dist, optimal_order, axis=1)[:, :lim]
-            knn_tgts_ = np.take_along_axis(knn_tgts, optimal_order, axis=1)[:, :lim]
-            knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+        print('With Optimal-2 Order')
+        knn_p_optimal = EvalUtil.get_optimal_knn_log_prob(tgts, dist, knn_tgts)
 
-            p_ = torch.from_numpy(p).float()
-            knn_p_ = torch.from_numpy(knn_p).float()
-            coeff_lst = np.arange(20) / 20
-            for coeff in coeff_lst:
-                if coeff == 0:
-                    new_p = p_
-                else:
-                    new_p = EvalUtil.combine_knn_and_vocab_probs(
-                                knn_p_,
-                                p_,
-                                coeff)
-                ppl = EvalUtil.eval_ppl(new_p)
+        p_ = torch.from_numpy(p).float()
+        knn_p_ = torch.from_numpy(knn_p_optimal).float()
+        coeff_lst = np.arange(20) / 20
+        for coeff in coeff_lst:
+            if coeff == 0:
+                new_p = p_
+            else:
+                new_p = EvalUtil.combine_knn_and_vocab_probs(
+                            knn_p_,
+                            p_,
+                            coeff)
+            ppl = EvalUtil.eval_ppl(new_p)
+            print('coeff = {:.3f}, knn_ppl = {}'.format(coeff, ppl))
 
-                f.write('{} {} {} {}\n'.format(
-                    args.k, lim, coeff, ppl))
+
+
+
+    if args.original:
+        print('With Original Order')
+
+        nsteps = 16
+        stepsize = args.k // nsteps
+        lim_lst = np.arange(nsteps)
+
+        with open('coeff_lim_tradeoff-original.txt', 'w') as f:
+            f.write('k lim coeff ppl\n')
+            for i, lim in enumerate(lim_lst[1:]):
+                lim = lim * stepsize
+                print(i, lim)
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+
+                p_ = torch.from_numpy(p).float()
+                knn_p_ = torch.from_numpy(knn_p).float()
+                coeff_lst = np.arange(20) / 20
+                for coeff in coeff_lst:
+                    if coeff == 0:
+                        new_p = p_
+                    else:
+                        new_p = EvalUtil.combine_knn_and_vocab_probs(
+                                    knn_p_,
+                                    p_,
+                                    coeff)
+                    ppl = EvalUtil.eval_ppl(new_p)
+
+                    f.write('{} {} {} {}\n'.format(
+                        args.k, lim, coeff, ppl))
+
+    if args.optimal:
+        print('With Optimal Order')
+        optimal_order = Rerank.optimal_order(label, dist)
+
+        nsteps = 16
+        stepsize = args.k // nsteps
+        lim_lst = np.arange(nsteps)
+
+        with open('coeff_lim_tradeoff.txt', 'w') as f:
+            f.write('k lim coeff ppl\n')
+            for lim in lim_lst[1:]:
+                lim = lim * stepsize
+                print(lim)
+                dist_ = np.take_along_axis(dist, optimal_order, axis=1)[:, :lim]
+                knn_tgts_ = np.take_along_axis(knn_tgts, optimal_order, axis=1)[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+
+                p_ = torch.from_numpy(p).float()
+                knn_p_ = torch.from_numpy(knn_p).float()
+                coeff_lst = np.arange(20) / 20
+                for coeff in coeff_lst:
+                    if coeff == 0:
+                        new_p = p_
+                    else:
+                        new_p = EvalUtil.combine_knn_and_vocab_probs(
+                                    knn_p_,
+                                    p_,
+                                    coeff)
+                    ppl = EvalUtil.eval_ppl(new_p)
+
+                    f.write('{} {} {} {}\n'.format(
+                        args.k, lim, coeff, ppl))
     # # count all knns
     # def writefile(path, c):
     #     with open(path, 'w') as f:
@@ -396,6 +455,18 @@ class EvalUtil:
         return yhat_knn_prob.reshape(-1, 1)
 
     @staticmethod
+    def get_optimal_knn_log_prob(tgts, dists, knn_tgts):
+        k = knn_tgts.shape[1]
+
+        lst = []
+        for lim in range(1, k):
+            lst.append(EvalUtil.get_knn_log_prob(tgts, dists[:, :lim], knn_tgts[:, :lim]))
+
+        knn_p_ = np.concatenate(lst, axis=1)
+
+        return knn_p_.argmin(axis=1).reshape(-1, 1)
+
+    @staticmethod
     def combine_knn_and_vocab_probs(knn_p, vocab_p, coeff):
         combine_probs = torch.stack([vocab_p, knn_p], dim=0)
         coeffs = torch.ones_like(combine_probs)
@@ -423,6 +494,9 @@ if __name__ == '__main__':
     parser.add_argument('--lookup-k', default=1024, type=int)
     # examine
     parser.add_argument('--k', default=1024, type=int)
+    parser.add_argument('--original', action='store_true')
+    parser.add_argument('--optimal', action='store_true')
+    parser.add_argument('--optimal-2', action='store_true')
     args = parser.parse_args()
 
     print(args)

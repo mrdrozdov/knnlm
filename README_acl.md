@@ -37,7 +37,7 @@ python build_dstore.py \
     --starting_point 0
 ```
 
-This step takes about ? hours with following settings:
+This step takes about 15 hours with following settings:
 
 ```
 #SBATCH --partition=1080ti-long
@@ -81,33 +81,49 @@ This should output the perplexity w/o KNN, and multiple perplexity values w/ KNN
 
 # Step 4. Start building the allrank data.
 
-First, cache the neighbors for the training data. We don't need all the neighbors here.
+# Step 4a. Create new data splits from validation data.
+
+```
+python split_data.py \
+    --dstore dstore_valid \
+    --dstore_size 217646 \
+    --output from_dstore_valid \
+    --tr_size 100000 \
+    --va_size 10000 \
+    --te_size 107646
+```
+
+# Step 4b. Cache vectors and write allrank data.
+
+First, cache the neighbors for the training data.
 
 ```
 python offline_eval.py \
-    --bsize 200 \
-    --dstore dstore_train \
-    --dstore-size 103225485 \
+    --bsize 1000 \
+    --dstore from_dstore_valid/tr \
+    --dstore-size 100000 \
     --knn-lookup-mode unique \
     --knn-dstore dstore_train \
     --knn-dstore-size 103225485 \
     --knn-sim-func "do_not_recomp_l2" \
-    --knn --k 128 \
-    --save --save-to lookup_train
+    --knn --k 1024 \
+    --save --save-to from_dstore_valid/lookup_tr
 ```
 
 Then sample from here to create the new data.
 
 ```
-python build_allrank_data.py --quant \
+python build_allrank_data.py \
+    --feat-idx \
     --dstore dstore_train \
     --dstore-size 103225485 \
     --lookup lookup_train \
-    --lookup-k 128 \
+    --lookup-k 64 \
+    --lookup-sparse \
     --output allrank_train \
     --ntrain 10000 \
     --nvalid 1000 \
-    --k 128
+    --k 64
 ```
 
 The file this creates is roughly 20GB.
@@ -136,3 +152,7 @@ There are some key values to modify.
 ```
 "slate_length": 128 # This should match the value of k used.
 ```
+
+Build the dataset from the validation data! Validation has 200k tokens. Use half for training, some for val, and some for test.
+
+Do as much as you can on dexter. Transfer datasets to gypsum to run LTR experiments.
