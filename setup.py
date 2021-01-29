@@ -139,7 +139,7 @@ setup(
         'numpy',
         'regex',
         'sacrebleu',
-        'torch',
+#        'torch',
         'tqdm',
     ],
     dependency_links=dependency_links,

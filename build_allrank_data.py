@@ -15,14 +15,14 @@ def main(args):
     os.system('mkdir -p {}'.format(args.output))
 
     print('TRAIN')
-    out = build_split(args.tr_dstore, args.tr_dstore_size, args.tr_lookup, args.tr_lookup_k, args.k, args.ntrain, shuffle=True, balance=True)
+    out = build_split(args.tr_dstore, args.tr_dstore_size, args.tr_lookup, args.tr_lookup_k, args.k, args.ntrain, shuffle=not args.tr_noshuffle, balance=True)
     path = os.path.join(args.output, 'train.txt')
-    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'])
+    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
 
     print('VALID')
-    out = build_split(args.va_dstore, args.va_dstore_size, args.va_lookup, args.va_lookup_k, args.k, args.nvalid, shuffle=False, balance=False)
+    out = build_split(args.va_dstore, args.va_dstore_size, args.va_lookup, args.va_lookup_k, args.k, args.nvalid, shuffle=args.va_shuffle, balance=False)
     path = os.path.join(args.output, 'vali.txt')
-    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'])
+    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
 
 
 def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, n, shuffle=True, balance=False):
@@ -35,6 +35,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
         np.random.shuffle(index)
     index = index[:n]
 
+    src = split_dstore.src[index]
     tgts = split_dstore.tgts[index]
     knns = split_dstore.knns[index, :lookup_k]
     dist = split_dstore.dist[index, :lookup_k] # dist is sorted from hi to lo
@@ -44,7 +45,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
     if balance:
-        npos = k // 3
+        npos = 10
         nneg = k - npos
 
         # count stats
@@ -76,6 +77,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
             return np.concatenate([x0, x1], axis=1)
 
         tgts = tgts[has_both]
+        src = src[has_both]
         knns = _filter(knns, pos_order, neg_order)
         dist = _filter(dist, pos_order, neg_order)
         knn_tgts = _filter(knn_tgts, pos_order, neg_order)
@@ -99,14 +101,14 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     print('has_negative = {} / {}'.format(np.sum(has_negative), size))
     print('has_both = {} / {}'.format(np.sum(has_both), size))
 
-    del tgts
-    del knn_tgts
-
 
     qids = qids[has_both]
     dist = dist[has_both]
     label = label[has_both]
     knns = knns[has_both]
+    tgts = tgts[has_both]
+    src = src[has_both]
+    knn_tgts = knn_tgts[has_both]
 
     size = label.shape[0]
 
@@ -135,24 +137,33 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     print('re-order')
     label = np.take_along_axis(label, new_order, axis=1)
     knns = np.take_along_axis(knns, new_order, axis=1)
+    knn_tgts = np.take_along_axis(knn_tgts, new_order, axis=1)
 
     out = {}
     out['qids'] = qids
     out['label'] = label
     out['feat_idx'] = knns
+    out['feat_tgt'] = knn_tgts
+    out['q_src'] = src
+    out['q_tgt'] = tgts
+
 
     return out
 
 
-def write_allrank_data(path, qids, label, feat_idx):
+def write_allrank_data(path, qids, label, feat_idx, query_src, query_tgt, feat_tgt):
     print('writing {} with feat_idx shape {}'.format(path, feat_idx.shape))
     size, k, _ = label.shape
     with open(path, 'w') as f:
         for i_slate in range(size):
             for i_k in range(k):
-                q = int(qids[i_slate])
+                q_id = int(qids[i_slate])
                 y = int(label[i_slate, i_k, 0])
-                f.write('{} qid:{} 0:{}'.format(y, q, feat_idx[i_slate, i_k, 0]))
+                x_id = feat_idx[i_slate, i_k, 0]
+                q_src = int(query_src[i_slate])
+                q_tgt = int(query_tgt[i_slate])
+                x_tgt = int(feat_tgt[i_slate, i_k, 0])
+                f.write('{} qid:{} 0:{} 1:{} 2:{} 3:{}'.format(y, q_id, x_id, q_src, q_tgt, x_tgt))
                 f.write('\n')
 
 
@@ -167,6 +178,7 @@ class Dstore:
         path = self.path
         self.keys = np.memmap(os.path.join(path, 'dstore_keys.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, self.vec_size))
         self.tgts = np.memmap(os.path.join(path, 'dstore_tgts.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
+        self.src = np.memmap(os.path.join(path, 'dstore_src.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
         self.vals = np.memmap(os.path.join(path, 'dstore_vals.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
         self.prob = np.memmap(os.path.join(path, 'dstore_prob.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, 1))
         if has_row:
@@ -191,6 +203,7 @@ if __name__ == '__main__':
     parser.add_argument('--tr-lookup', default='from_dstore_valid/lookup_tr', type=str)
     parser.add_argument('--tr-lookup-k', default=1024, type=int)
     parser.add_argument('--ntrain', default=5000, type=int)
+    parser.add_argument('--tr-noshuffle', action='store_true')
     # dstore-va
     parser.add_argument('--va-dstore', default='from_dstore_valid/va', type=str)
     parser.add_argument('--va-dstore-size', default=10000, type=int)
