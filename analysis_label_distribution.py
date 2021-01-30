@@ -29,6 +29,7 @@ import collections
 import os
 
 import numpy as np
+import pandas as pd
 
 from tqdm import tqdm
 
@@ -48,16 +49,12 @@ def main(args):
     print('loading targets. this may take a few minutes')
     tgts = dstore.tgts[done_mask][:]
     print('loading knns. this may take a few minutes')
-    knns = dstore.knns[done_mask][:, :args.k+1]
-    knns0_tgt = dstore.tgts[knns[:, 0].reshape(-1)]
+    knns = dstore.knns[done_mask][:, :args.k][:]
+    knn_tgts = dstore.knn_tgts[done_mask][:, :args.k][:]
+    knns0_tgt = knn_tgts[:, 0]
     first_neighbor_is_tgt = tgts == knns0_tgt
     print('{} / {} rows have first neighbor as target'.format(first_neighbor_is_tgt.sum(), tgts.shape[0]))
-    print('Note: This could be less than 100% because approximate distance is used.')
     print('')
-
-    # throwaway first neighbor because it is usually the identity
-    knns = knns[:, 1:]
-    knn_tgts = dstore.tgts[knns.reshape(-1)].reshape(ndone, args.k, 1)[:]
 
     # binary label indicating the knn target matches the original target
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
@@ -78,7 +75,11 @@ def main(args):
     print('')
 
     nsample = 10
-    sample_no_positive = tgts[has_positive == 0][:nsample]
+    tgts_ = tgts[has_positive == 0]
+    index = np.arange(tgts_.shape[0])
+    np.random.shuffle(index)
+    index = index[:nsample]
+    sample_no_positive = tgts_[index]
     print('examples with no positives:')
     for i in range(nsample):
         idx = int(sample_no_positive[i])
@@ -87,7 +88,11 @@ def main(args):
         print('* [{}] "{}" with term frequency {}'.format(idx, tok, tf))
     print('')
 
-    sample_no_negative = tgts[has_negative == 0][:nsample]
+    tgts_ = tgts[has_negative == 0]
+    index = np.arange(tgts_.shape[0])
+    np.random.shuffle(index)
+    index = index[:nsample]
+    sample_no_negative = tgts_[index]
     print('examples with no negatives:')
     for i in range(nsample):
         idx = int(sample_no_negative[i])
@@ -97,38 +102,97 @@ def main(args):
     print('')
 
     # count all knns
-    def writefile(path, c):
-        with open(path, 'w') as f:
-            for idx in c.keys():
-                tok = vocab.symbols[idx]
-                f.write('{} {} {} {}\n'.format(
-                    idx, tok, vocab.count[idx], c[idx]
-                    ))
+    if False:
+        def writefile(path, c):
+            with open(path, 'w') as f:
+                for idx in c.keys():
+                    tok = vocab.symbols[idx]
+                    f.write('{} {} {} {}\n'.format(
+                        idx, tok, vocab.count[idx], c[idx]
+                        ))
 
-    print('count neighbor frequency and write to file')
-    c = collections.Counter()
-    c.update(knn_tgts.reshape(-1))
-    writefile('knn_count.txt', c)
+        print('count neighbor frequency and write to file')
+        c = collections.Counter()
+        c.update(knn_tgts.reshape(-1))
+        writefile('knn_count.txt', c)
 
-    print('count tp and write to file')
-    c = collections.Counter()
-    c.update(knn_tgts[label == 1].reshape(-1))
-    writefile('tp_count.txt', c)
+        print('count tp and write to file')
+        c = collections.Counter()
+        c.update(knn_tgts[label == 1].reshape(-1))
+        writefile('tp_count.txt', c)
 
-    print('count fp and write to file')
-    c = collections.Counter()
-    c.update(knn_tgts[label == 0].reshape(-1))
-    writefile('fp_count.txt', c)
+        print('count fp and write to file')
+        c = collections.Counter()
+        c.update(knn_tgts[label == 0].reshape(-1))
+        writefile('fp_count.txt', c)
 
-    print('count npos and write to file')
-    c = collections.Counter()
-    for i in range(ndone):
-        idx = int(tgts[i])
-        npos = label[i].sum()
-        c[idx] += npos
-    writefile('npos_count.txt', c)
+        print('count npos and write to file')
+        c = collections.Counter()
+        for i in range(ndone):
+            idx = int(tgts[i])
+            npos = label[i].sum()
+            c[idx] += npos
+        writefile('npos_count.txt', c)
+        print('')
 
-    print('')
+    # Count unique entries.
+    if False:
+        def print_unique(knns, knn_tgts, cfg=None):
+            num_keys = np.unique(knns).shape[0]
+            num_vocab = np.unique(knn_tgts).shape[0]
+            if cfg is None:
+                print('vocab={} keys={}'.format(num_vocab, num_keys))
+            else:
+                print('[{}] vocab={} keys={}'.format(cfg, num_vocab, num_keys))
+
+        print_unique(knns, knn_tgts)
+
+        num_k_splits = 4
+        num_top_lst = [-1, 0, 10, 100]
+        num_top_start = np.argmax(vocab.count)
+        for top in num_top_lst:
+            top = num_top_start + top if top >= 0 else top
+            for i_k in range(num_k_splits):
+                k_ = (i_k + 1) * (args.k // num_k_splits)
+
+                knns_ = knns[:, :k_]
+                knn_tgts_ = knn_tgts[:, :k_]
+                top_mask = knn_tgts_ >= top
+                knn_tgts_ = knn_tgts_[top_mask]
+                knns_ = knns_[top_mask]
+
+                print_unique(knns_, knn_tgts_, cfg=(top, k_))
+        print('')
+
+    # term freq X key freq X len(unique(keys))
+    # unique_terms = np.unique(knn_tgts)
+    # for term in tqdm(unique_terms):
+    #     mask = knn_tgts == term
+    #     knns_ = knns[mask]
+    term_to_key = collections.defaultdict(set)
+    term_count = collections.Counter()
+    for term, key in tqdm(zip(knn_tgts.reshape(-1).tolist(), knns.reshape(-1))):
+        term_to_key[term].add(key)
+        term_count[term] += 1
+def w_(term_to_key, term_count, vocab):
+    with open('tf_by_kf_by_uniq.txt', 'w') as f:
+        terms = list(term_count.keys())
+        f.write('sym tf tf_as_key kf\n')
+        for t in terms:
+            sym = vocab.symbols[t]
+            tf = vocab.count[t]
+            kf = len(term_to_key[t])
+            tf_as_key = term_count[t]
+            f.write('{} {} {} {}\n'.format(
+                sym, tf, tf_as_key, kf))
+    pass
+    # 3058601.44it/s
+    # 1101144.43it/s
+    # df = pd.DataFrame({'term': knn_tgts.reshape(-1), 'key': knns.reshape(-1), 'ones': np.ones(knns.reshape(-1).shape[0])})
+    import ipdb; ipdb.set_trace()
+    pass
+
+
 
 
 class Dstore:
@@ -148,6 +212,7 @@ class Dstore:
 
     def add_neighbors(self, path, k):
         self.knns = np.memmap(os.path.join(path, 'lookup_knns.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
+        self.knn_tgts = np.memmap(os.path.join(path, 'lookup_knn_tgts.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
         self.dist = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
         self.lookup_done = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
@@ -333,17 +398,15 @@ class Dictionary(object):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # dstore
-    parser.add_argument('--dstore', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/dstore_train', type=str)
-    parser.add_argument('--dstore-size', default=103225485, type=int)
-    parser.add_argument('--vocab', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/data-bin/wikitext-103/dict.txt')
+    parser.add_argument('--dstore', default='from_dstore_valid/tr', type=str)
+    parser.add_argument('--dstore-size', default=100000, type=int)
+    parser.add_argument('--vocab', default='data-bin/wikitext-103/dict.txt')
     # dstore neighbors
-    parser.add_argument('--lookup', default='/mnt/nfs/work1/mccallum/adrozdov/code/knnlm/lookup_train', type=str)
-    parser.add_argument('--lookup-k', default=64, type=int)
+    parser.add_argument('--lookup', default='from_dstore_valid/lookup_tr', type=str)
+    parser.add_argument('--lookup-k', default=1024, type=int)
     # examine
-    parser.add_argument('--k', default=63, type=int)
+    parser.add_argument('--k', default=64, type=int)
     args = parser.parse_args()
-
-    assert args.k < args.lookup_k, "The first neighbor is usually the identity and is thrown away."
 
     print(args)
 
