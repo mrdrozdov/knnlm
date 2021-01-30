@@ -164,34 +164,27 @@ def main(args):
                 print_unique(knns_, knn_tgts_, cfg=(top, k_))
         print('')
 
-    # term freq X key freq X len(unique(keys))
-    # unique_terms = np.unique(knn_tgts)
-    # for term in tqdm(unique_terms):
-    #     mask = knn_tgts == term
-    #     knns_ = knns[mask]
-    term_to_key = collections.defaultdict(set)
-    term_count = collections.Counter()
-    for term, key in tqdm(zip(knn_tgts.reshape(-1).tolist(), knns.reshape(-1))):
-        term_to_key[term].add(key)
-        term_count[term] += 1
-def w_(term_to_key, term_count, vocab):
-    with open('tf_by_kf_by_uniq.txt', 'w') as f:
-        terms = list(term_count.keys())
-        f.write('sym tf tf_as_key kf\n')
-        for t in terms:
-            sym = vocab.symbols[t]
-            tf = vocab.count[t]
-            kf = len(term_to_key[t])
-            tf_as_key = term_count[t]
-            f.write('{} {} {} {}\n'.format(
-                sym, tf, tf_as_key, kf))
-    pass
-    # 3058601.44it/s
-    # 1101144.43it/s
-    # df = pd.DataFrame({'term': knn_tgts.reshape(-1), 'key': knns.reshape(-1), 'ones': np.ones(knns.reshape(-1).shape[0])})
-    import ipdb; ipdb.set_trace()
-    pass
+    if True:
+        # term freq X key freq X len(unique(keys))
+        def w_(term_to_key, term_count, vocab):
+            with open('tf_by_kf_by_uniq.txt', 'w') as f:
+                terms = list(term_count.keys())
+                f.write('sym tf tf_as_key kf\n')
+                for t in terms:
+                    sym = vocab.symbols[t]
+                    tf = vocab.count[t]
+                    kf = len(term_to_key[t])
+                    tf_as_key = term_count[t]
+                    f.write('{} {} {} {}\n'.format(
+                        sym, tf, tf_as_key, kf))
 
+        term_to_key = collections.defaultdict(set)
+        term_count = collections.Counter()
+        for term, key in tqdm(zip(knn_tgts.reshape(-1).tolist(), knns.reshape(-1))):
+            term_to_key[term].add(key)
+            term_count[term] += 1
+
+        w_(term_to_key, term_count, vocab)
 
 
 
