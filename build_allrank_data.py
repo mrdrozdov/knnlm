@@ -16,7 +16,7 @@ def main(args):
 
     print('TRAIN')
     out = build_split(args.tr_dstore, args.tr_dstore_size, args.tr_lookup, args.tr_lookup_k, args.k, args.ntrain,
-            shuffle=not args.tr_noshuffle, balance=args.tr_balance, should_filter_top=True)
+            shuffle=not args.tr_noshuffle, balance=args.tr_balance, should_filter_top=True, require_both=True)
     path = os.path.join(args.output, 'train.txt')
     write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
 
@@ -27,7 +27,7 @@ def main(args):
     write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
 
 
-def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, n, shuffle=True, balance=False, should_filter_top=False):
+def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, n, shuffle=True, balance=False, should_filter_top=False, require_both=False):
     split_dstore = Dstore(split_dstore_path, split_dstore_size, 1024)
     split_dstore.initialize(has_row=True)
     split_dstore.add_neighbors(lookup_path, lookup_k)
@@ -125,14 +125,14 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     print('has_negative = {} / {}'.format(np.sum(has_negative), size))
     print('has_both = {} / {}'.format(np.sum(has_both), size))
 
-
-    qids = qids[has_both]
-    dist = dist[has_both]
-    label = label[has_both]
-    knns = knns[has_both]
-    tgts = tgts[has_both]
-    src = src[has_both]
-    knn_tgts = knn_tgts[has_both]
+    if require_both:
+        qids = qids[has_both]
+        dist = dist[has_both]
+        label = label[has_both]
+        knns = knns[has_both]
+        tgts = tgts[has_both]
+        src = src[has_both]
+        knn_tgts = knn_tgts[has_both]
 
     size = label.shape[0]
 
@@ -400,26 +400,26 @@ if __name__ == '__main__':
     #parser.add_argument('--dstore', default='dstore_train', type=str)
     #parser.add_argument('--dstore-size', default=103225485, type=int)
     # dstore-tr
-    parser.add_argument('--tr-dstore', default='from_dstore_valid/tr', type=str)
+    parser.add_argument('--tr-dstore', default='from_dstore_valid-2/tr', type=str)
     parser.add_argument('--tr-dstore-size', default=100000, type=int)
-    parser.add_argument('--tr-lookup', default='from_dstore_valid/lookup_tr', type=str)
+    parser.add_argument('--tr-lookup', default='from_dstore_valid-2/lookup_tr', type=str)
     parser.add_argument('--tr-lookup-k', default=1024, type=int)
-    parser.add_argument('--ntrain', default=5000, type=int)
+    parser.add_argument('--ntrain', default=100000, type=int)
     parser.add_argument('--tr-noshuffle', action='store_true')
     parser.add_argument('--tr-balance', action='store_true')
     # dstore-va
-    parser.add_argument('--va-dstore', default='from_dstore_valid/va', type=str)
-    parser.add_argument('--va-dstore-size', default=10000, type=int)
-    parser.add_argument('--va-lookup', default='from_dstore_valid/lookup_va', type=str)
+    parser.add_argument('--va-dstore', default='from_dstore_valid-2/va', type=str)
+    parser.add_argument('--va-dstore-size', default=100000, type=int)
+    parser.add_argument('--va-lookup', default='from_dstore_valid-2/lookup_va', type=str)
     parser.add_argument('--va-lookup-k', default=1024, type=int)
-    parser.add_argument('--nvalid', default=10000, type=int)
+    parser.add_argument('--nvalid', default=100000, type=int)
     parser.add_argument('--va-shuffle', action='store_true')
     # allrank
     parser.add_argument('--filter-top', default=-1, type=int, help='If > 1, then removes any example with target in the top N term freqs.')
     parser.add_argument('--vocab', default='data-bin/wikitext-103/dict.txt', type=str)
     parser.add_argument('--output', default=None, type=str)
-    parser.add_argument('--seed', default=121, type=int)
-    parser.add_argument('--k', default=32, type=int)
+    parser.add_argument('--seed', default=1231, type=int)
+    parser.add_argument('--k', default=256, type=int)
     args = parser.parse_args()
 
     print(args)
