@@ -138,9 +138,21 @@ def main(args):
     query_id = dstore.allrank.query_id[:]
     print('WARNING: Manually setting query id.')
     query_id = query_id - 100000
-    assert query_id.min() == 0
+    assert query_id.min() >= 0
     rerank_tgts = tgts[query_id.reshape(-1)]
     rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
+
+    # (optional): filter by freq
+    filter_by_freq = True
+    top_freq = 500
+    print('shape = {}'.format(rerank_tgts.shape))
+    print('filtering by top {} freq...'.format(top_freq))
+    mask = rerank_tgts <= top_freq
+    query_id = query_id[mask.reshape(-1)]
+    rerank_tgts = tgts[query_id.reshape(-1)]
+    rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
+    print('new shape = {}'.format(rerank_tgts.shape))
+
     rerank_dist = dstore.dist[query_id.reshape(-1)][:, :args.allrank_k]
 
     # compute original ppl
@@ -171,7 +183,7 @@ def main(args):
             if ppl < best_val:
                 best_val = ppl
                 best_cfg = (lim, coeff)
-    print('knn-lm[best] ppl={} cfg={}'.format(best_val, best_cfg))
+    print('knn-lm[best] ppl={} cfg={} (without re-ordering)'.format(best_val, best_cfg))
     #
 
     best_val = np.inf
@@ -190,7 +202,7 @@ def main(args):
         if ppl < best_val:
             best_val = ppl
             best_cfg = (args.allrank_k, coeff)
-    print('knn-lm[best] ppl={} cfg={}'.format(best_val, best_cfg))
+    print('knn-lm[best] ppl={} cfg={} (keeping k at max)'.format(best_val, best_cfg))
 
     # Need to place in optimal order to get the correct dist...
     rerank_label = (rerank_knn_tgts == rerank_tgts.reshape(-1, 1, 1)).astype(np.int)
@@ -225,6 +237,8 @@ def main(args):
 
     # Now apply the predicted rerank.
     rerank_order = dstore.allrank.knn_rank[:]
+    if filter_by_freq:
+        rerank_order = rerank_order[mask.reshape(-1)]
     rerank_dist = np.take_along_axis(rerank_dist, rerank_order, axis=1)
     rerank_knn_tgts = np.take_along_axis(rerank_knn_tgts, rerank_order, axis=1)
     #
