@@ -143,6 +143,7 @@ def main(args):
     assert query_id.min() >= 0
     rerank_tgts = tgts[query_id.reshape(-1)]
     rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
+    rerank_scores = dstore.allrank.scores[:, :args.allrank_k]
 
     # (optional): filter by freq
     filter_by_freq = False
@@ -154,6 +155,7 @@ def main(args):
         mask = rerank_tgts <= top_freq
         mask = np.logical_and(mask, rerank_tgts > 3)
         query_id = query_id[mask.reshape(-1)]
+        rerank_scores = rerank_scores[mask.reshape(-1)]
         rerank_tgts = tgts[query_id.reshape(-1)]
         rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
         print('new shape = {}'.format(rerank_tgts.shape))
@@ -216,8 +218,11 @@ def main(args):
     rerank_label = (rerank_knn_tgts == rerank_tgts.reshape(-1, 1, 1)).astype(np.int)
     optimal_order = Rerank.optimal_order(rerank_label, rerank_dist)
 
-    rerank_dist = np.take_along_axis(rerank_dist, optimal_order, axis=1)
-    rerank_knn_tgts = np.take_along_axis(rerank_knn_tgts, optimal_order, axis=1)
+    rerank_dist_ = np.take_along_axis(rerank_dist, optimal_order, axis=1)
+    rerank_knn_tgts_ = np.take_along_axis(rerank_knn_tgts, optimal_order, axis=1)
+
+    my_dist_ = rerank_dist_
+    my_knn_tgts_ = rerank_knn_tgts_
 
     #
     best_val = np.inf
@@ -227,8 +232,8 @@ def main(args):
 
     for i in range(1, limits_to_check + 1):
         lim = i * limit_size
-        dist_ = rerank_dist[:, :lim]
-        knn_tgts_ = rerank_knn_tgts[:, :lim]
+        dist_ = my_dist_[:, :lim]
+        knn_tgts_ = my_knn_tgts_[:, :lim]
         knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
         knn_p_ = torch.from_numpy(knn_p).float()
         coeff_lst = np.arange(20) / 20
@@ -248,8 +253,8 @@ def main(args):
     rerank_order = dstore.allrank.knn_rank[:]
     if filter_by_freq:
         rerank_order = rerank_order[mask.reshape(-1)]
-    rerank_dist = np.take_along_axis(rerank_dist, rerank_order, axis=1)
-    rerank_knn_tgts = np.take_along_axis(rerank_knn_tgts, rerank_order, axis=1)
+    my_dist_ = np.take_along_axis(rerank_dist_, rerank_order, axis=1)
+    my_knn_tgts_ = np.take_along_axis(rerank_knn_tgts_, rerank_order, axis=1)
     #
     best_val = np.inf
     best_cfg = None
@@ -258,8 +263,8 @@ def main(args):
 
     for i in range(1, limits_to_check + 1):
         lim = i * limit_size
-        dist_ = rerank_dist[:, :lim]
-        knn_tgts_ = rerank_knn_tgts[:, :lim]
+        dist_ = my_dist_[:, :lim]
+        knn_tgts_ = my_knn_tgts_[:, :lim]
         knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
         knn_p_ = torch.from_numpy(knn_p).float()
         coeff_lst = np.arange(20) / 20
@@ -274,10 +279,37 @@ def main(args):
                 best_cfg = (lim, coeff)
     print('knn-lm-rerank[best] ppl={} cfg={}'.format(best_val, best_cfg))
     _my_globals['knn-lm[rerank]'] = (best_val, best_cfg)
+    # use scores instead
+    my_dist_ = rerank_scores
+    my_knn_tgts_ = np.take_along_axis(rerank_knn_tgts_, rerank_order, axis=1)
+
+    best_val = np.inf
+    best_cfg = None
+    limits_to_check = 8
+    limit_size = args.allrank_k // limits_to_check
+
+    for i in range(1, limits_to_check + 1):
+        lim = i * limit_size
+        dist_ = my_dist_[:, :lim]
+        knn_tgts_ = my_knn_tgts_[:, :lim]
+        knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
+        knn_p_ = torch.from_numpy(knn_p).float()
+        coeff_lst = np.arange(20) / 20
+        for coeff in coeff_lst[1:]:
+            new_p = EvalUtil.combine_knn_and_vocab_probs(
+                        knn_p_,
+                        p_,
+                        coeff)
+            ppl = EvalUtil.eval_ppl(new_p)
+            if ppl < best_val:
+                best_val = ppl
+                best_cfg = (lim, coeff)
+    print('knn-lm-scores[best] ppl={} cfg={}'.format(best_val, best_cfg))
+    _my_globals['knn-lm[scores]'] = (best_val, best_cfg)
     #
     print('')
     #
-    keys = ['original', 'knn-lm', 'knn-lm[optimal]', 'knn-lm[rerank]']
+    keys = ['original', 'knn-lm', 'knn-lm[optimal]', 'knn-lm[rerank]', 'knn-lm[scores]']
     base_val = _my_globals[keys[0]][0]
     print('{:>16} {:.4f}'.format(keys[0], base_val))
     for k in keys[1:]:
@@ -342,6 +374,7 @@ class DstoreAllrank:
         out.knn_tgts = np.memmap(os.path.join(path, 'out_vali_knn_tgts.npy'), dtype=np.int, mode='r', shape=(size, k, 1))
         out.knns = np.memmap(os.path.join(path, 'out_vali_knns.npy'), dtype=np.int, mode='r', shape=(size, k, 1))
         out.knn_rank = np.memmap(os.path.join(path, 'out_vali_knn_rank.npy'), dtype=np.int, mode='r', shape=(size, k, 1))
+        out.scores = np.memmap(os.path.join(path, 'out_vali_scores.npy'), dtype=np.float32, mode='r', shape=(size, k, 1))
         out.query_id = np.memmap(os.path.join(path, 'out_vali_query_id.npy'), dtype=np.int, mode='r', shape=(size, 1))
         return out
 
