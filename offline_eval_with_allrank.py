@@ -33,6 +33,8 @@ import torch
 
 from tqdm import tqdm
 
+_my_globals = {}
+
 
 def main(args):
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
@@ -143,15 +145,18 @@ def main(args):
     rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
 
     # (optional): filter by freq
-    filter_by_freq = True
-    top_freq = 500
-    print('shape = {}'.format(rerank_tgts.shape))
-    print('filtering by top {} freq...'.format(top_freq))
-    mask = rerank_tgts <= top_freq
-    query_id = query_id[mask.reshape(-1)]
-    rerank_tgts = tgts[query_id.reshape(-1)]
-    rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
-    print('new shape = {}'.format(rerank_tgts.shape))
+    filter_by_freq = False
+    if args.k_freq > 0:
+        filter_by_freq = True
+        top_freq = args.k_freq
+        print('shape = {}'.format(rerank_tgts.shape))
+        print('filtering by top {} freq...'.format(top_freq))
+        mask = rerank_tgts <= top_freq
+        mask = np.logical_and(mask, rerank_tgts > 3)
+        query_id = query_id[mask.reshape(-1)]
+        rerank_tgts = tgts[query_id.reshape(-1)]
+        rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
+        print('new shape = {}'.format(rerank_tgts.shape))
 
     rerank_dist = dstore.dist[query_id.reshape(-1)][:, :args.allrank_k]
 
@@ -160,6 +165,8 @@ def main(args):
     p_ = torch.from_numpy(p[query_id.reshape(-1)]).float()
     original_ppl = EvalUtil.eval_ppl(p_)
     print('original ppl={}'.format(original_ppl))
+
+    _my_globals['original'] = (original_ppl, None)
 
     # Find best setting before any re-ordering...
     best_val = np.inf
@@ -184,6 +191,7 @@ def main(args):
                 best_val = ppl
                 best_cfg = (lim, coeff)
     print('knn-lm[best] ppl={} cfg={} (without re-ordering)'.format(best_val, best_cfg))
+    _my_globals['knn-lm'] = (best_val, best_cfg)
     #
 
     best_val = np.inf
@@ -234,6 +242,7 @@ def main(args):
                 best_val = ppl
                 best_cfg = (lim, coeff)
     print('knn-lm-optimal[best] ppl={} cfg={}'.format(best_val, best_cfg))
+    _my_globals['knn-lm[optimal]'] = (best_val, best_cfg)
 
     # Now apply the predicted rerank.
     rerank_order = dstore.allrank.knn_rank[:]
@@ -264,9 +273,16 @@ def main(args):
                 best_val = ppl
                 best_cfg = (lim, coeff)
     print('knn-lm-rerank[best] ppl={} cfg={}'.format(best_val, best_cfg))
+    _my_globals['knn-lm[rerank]'] = (best_val, best_cfg)
     #
     print('')
     #
+    keys = ['original', 'knn-lm', 'knn-lm[optimal]', 'knn-lm[rerank]']
+    base_val = _my_globals[keys[0]][0]
+    print('{:>16} {:.4f}'.format(keys[0], base_val))
+    for k in keys[1:]:
+        val, cfg = _my_globals[k]
+        print('{:>16} {:.4f} {:.4f} {}'.format(k, val, val - base_val, cfg))
 
 
 class Rerank(object):
@@ -561,6 +577,7 @@ if __name__ == '__main__':
     parser.add_argument('--allrank-k', default=128, type=int)
     # examine
     parser.add_argument('--k', default=1024, type=int)
+    parser.add_argument('--k-freq', default=-1, type=int)
     args = parser.parse_args()
 
     print(args)
