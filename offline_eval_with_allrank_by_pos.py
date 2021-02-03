@@ -213,25 +213,51 @@ def main(args):
     print('WARNING: Manually setting query id.')
     query_id = query_id - 100000
     assert query_id.min() >= 0
+    src_pos = dstore.src_pos[:]
+    tgt_pos = np.concatenate([src_pos[1:], np.zeros(1).reshape(1, 1)], axis=0) # HACK
 
     freq_lst = [10, 100, 1000, 10000, -1]
 
+    target_tag = ['NN', 'NNP', 'NNPS', 'NNS']
+    target_tag_idx = [dstore.tag2idx[t] for t in target_tag]
+
     for top_freq in freq_lst:
+        skip_tags = True
         mask = np.zeros(tgts.shape[0], dtype=np.int)
         mask[query_id] = 1
         mask = mask == 1
         if top_freq > 0:
-            mask = np.logical_and(mask,
-                                  np.logical_and(tgts.reshape(-1) >= 4, tgts.reshape(-1) < top_freq + 4))
+            is_top_freq = np.logical_and(tgts.reshape(-1) >= 4, tgts.reshape(-1) < top_freq + 4)
+            mask = np.logical_and(mask, is_top_freq)
+        if target_tag_idx is not None and not skip_tags:
+            is_tag = np.isin(tgt_pos.reshape(-1), target_tag_idx)
+            mask_ = np.logical_and(mask, is_tag)
+            if mask_.sum() == 0:
+                skip_tags = True
+                print('WARNING: Skipping tags.')
+            else:
+                mask = mask_
+        assert mask.sum() > 0
 
-        mask_b = np.ones(query_id.shape[0], dtype=int)
+
+        mask_b = np.ones(query_id.shape[0], dtype=int) == 1
         tgts_ = tgts[query_id]
+        tgt_pos_ = tgts[query_id]
         if top_freq > 0:
-            mask_b[tgts_.reshape(-1) < 4] = 0
-            mask_b[tgts_.reshape(-1) >= top_freq + 4] = 0
-        mask_b = mask_b == 1
+            mask_b[tgts_.reshape(-1) < 4] = False
+            mask_b[tgts_.reshape(-1) >= top_freq + 4] = False
+        if target_tag_idx is not None and not skip_tags:
+            is_tag = np.isin(tgt_pos_.reshape(-1), target_tag_idx).reshape(-1)
+            mask_ = np.logical_and(mask_b, is_tag)
+            if mask_.sum() == 0:
+                skip_tags = True
+                print('WARNING: Skipping tags.')
+            else:
+                mask_b = mask_
+        assert mask_b.sum() > 0
 
-        print('RESULTS, top_freq={}'.format(top_freq))
+
+        print('RESULTS, top_freq={}, tag={}'.format(top_freq, target_tag))
         out_baseline = RunOriginal().run(dstore, vocab, mask=mask, mask_b=mask_b)
         baseline = out_baseline['ppl']
         print_results(out_baseline, None)
@@ -244,268 +270,6 @@ def main(args):
 
     sys.exit()
 
-    p = dstore.prob[:]
-    dist = dstore.dist[:, :args.k]
-    knn_p = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
-
-    p_ = torch.from_numpy(p).float()
-    knn_p_ = torch.from_numpy(knn_p).float()
-    coeff_lst = np.arange(20) / 20
-    print('ORIGINAL')
-    original_ppl = EvalUtil.eval_ppl(p_)
-    best_val = original_ppl
-    best_cfg = None
-    print('original ppl={}'.format(original_ppl))
-    for coeff in coeff_lst[1:]:
-        new_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        ppl = EvalUtil.eval_ppl(new_p)
-        if ppl < best_val:
-            best_val = ppl
-            best_cfg = coeff
-    print('knn-lm[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    print('')
-
-    print('KNN-LM w. many coefficients to check')
-    p_ = torch.from_numpy(p).float()
-    original_ppl = EvalUtil.eval_ppl(p_)
-    best_val = original_ppl
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.allrank_k // limits_to_check
-
-    for i in range(1, limits_to_check):
-        lim = i * limit_size
-        dist_ = dist[:, :lim]
-        knn_tgts_ = knn_tgts[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    print('')
-
-
-    print('KNN-LM (OPTIMAL)')
-    optimal_order = Rerank.optimal_order(label, dist)
-
-    best_val = original_ppl
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.k // limits_to_check
-
-    for i in range(1, limits_to_check):
-        lim = i * limit_size
-        dist_ = np.take_along_axis(dist, optimal_order, axis=1)[:, :lim]
-        knn_tgts_ = np.take_along_axis(knn_tgts, optimal_order, axis=1)[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
-        p_ = torch.from_numpy(p).float()
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm-optimal[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    print('')
-
-    print('KNN-LM (RE-RANK)')
-
-    #
-    query_id = dstore.allrank.query_id[:]
-    print('WARNING: Manually setting query id.')
-    query_id = query_id - 100000
-    assert query_id.min() >= 0
-    rerank_tgts = tgts[query_id.reshape(-1)]
-    rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
-    rerank_scores = dstore.allrank.scores[:, :args.allrank_k]
-
-    # (optional): filter by freq
-    filter_by_freq = False
-    if args.k_freq > 0:
-        filter_by_freq = True
-        top_freq = args.k_freq
-        print('shape = {}'.format(rerank_tgts.shape))
-        print('filtering by top {} freq...'.format(top_freq))
-        mask = rerank_tgts <= top_freq
-        mask = np.logical_and(mask, rerank_tgts > 3)
-        query_id = query_id[mask.reshape(-1)]
-        rerank_scores = rerank_scores[mask.reshape(-1)]
-        rerank_tgts = tgts[query_id.reshape(-1)]
-        rerank_knn_tgts = knn_tgts[query_id.reshape(-1), :args.allrank_k]
-        print('new shape = {}'.format(rerank_tgts.shape))
-
-    rerank_dist = dstore.dist[query_id.reshape(-1)][:, :args.allrank_k]
-
-    # compute original ppl
-    print('K={}'.format(args.allrank_k))
-    p_ = torch.from_numpy(p[query_id.reshape(-1)]).float()
-    original_ppl = EvalUtil.eval_ppl(p_)
-    print('original ppl={}'.format(original_ppl))
-
-    _my_globals['original'] = (original_ppl, None)
-
-    # Find best setting before any re-ordering...
-    best_val = np.inf
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.allrank_k // limits_to_check
-
-    for i in range(1, limits_to_check + 1):
-        lim = i * limit_size
-        dist_ = rerank_dist[:, :lim]
-        knn_tgts_ = rerank_knn_tgts[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm[best] ppl={} cfg={} (without re-ordering)'.format(best_val, best_cfg))
-    _my_globals['knn-lm'] = (best_val, best_cfg)
-    #
-
-    best_val = np.inf
-    best_cfg = None
-    dist_ = rerank_dist
-    knn_tgts_ = rerank_knn_tgts
-    knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
-    knn_p_ = torch.from_numpy(knn_p).float()
-    coeff_lst = np.arange(20) / 20
-    for coeff in coeff_lst[1:]:
-        new_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        ppl = EvalUtil.eval_ppl(new_p)
-        if ppl < best_val:
-            best_val = ppl
-            best_cfg = (args.allrank_k, coeff)
-    print('knn-lm[best] ppl={} cfg={} (keeping k at max)'.format(best_val, best_cfg))
-
-    # Need to place in optimal order to get the correct dist...
-    rerank_label = (rerank_knn_tgts == rerank_tgts.reshape(-1, 1, 1)).astype(np.int)
-    optimal_order = Rerank.optimal_order(rerank_label, rerank_dist)
-
-    rerank_dist_ = np.take_along_axis(rerank_dist, optimal_order, axis=1)
-    rerank_knn_tgts_ = np.take_along_axis(rerank_knn_tgts, optimal_order, axis=1)
-
-    my_dist_ = rerank_dist_
-    my_knn_tgts_ = rerank_knn_tgts_
-
-    #
-    best_val = np.inf
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.allrank_k // limits_to_check
-
-    for i in range(1, limits_to_check + 1):
-        lim = i * limit_size
-        dist_ = my_dist_[:, :lim]
-        knn_tgts_ = my_knn_tgts_[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm-optimal[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    _my_globals['knn-lm[optimal]'] = (best_val, best_cfg)
-
-    # Now apply the predicted rerank.
-    rerank_order = dstore.allrank.knn_rank[:]
-    if filter_by_freq:
-        rerank_order = rerank_order[mask.reshape(-1)]
-    my_dist_ = np.take_along_axis(rerank_dist_, rerank_order, axis=1)
-    my_knn_tgts_ = np.take_along_axis(rerank_knn_tgts_, rerank_order, axis=1)
-    #
-    best_val = np.inf
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.allrank_k // limits_to_check
-
-    for i in range(1, limits_to_check + 1):
-        lim = i * limit_size
-        dist_ = my_dist_[:, :lim]
-        knn_tgts_ = my_knn_tgts_[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm-rerank[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    _my_globals['knn-lm[rerank]'] = (best_val, best_cfg)
-    # use scores instead
-    my_dist_ = rerank_scores
-    my_knn_tgts_ = np.take_along_axis(rerank_knn_tgts_, rerank_order, axis=1)
-
-    best_val = np.inf
-    best_cfg = None
-    limits_to_check = 8
-    limit_size = args.allrank_k // limits_to_check
-
-    for i in range(1, limits_to_check + 1):
-        lim = i * limit_size
-        dist_ = my_dist_[:, :lim]
-        knn_tgts_ = my_knn_tgts_[:, :lim]
-        knn_p = EvalUtil.get_knn_log_prob(rerank_tgts, dist_, knn_tgts_)
-        knn_p_ = torch.from_numpy(knn_p).float()
-        coeff_lst = np.arange(20) / 20
-        for coeff in coeff_lst[1:]:
-            new_p = EvalUtil.combine_knn_and_vocab_probs(
-                        knn_p_,
-                        p_,
-                        coeff)
-            ppl = EvalUtil.eval_ppl(new_p)
-            if ppl < best_val:
-                best_val = ppl
-                best_cfg = (lim, coeff)
-    print('knn-lm-scores[best] ppl={} cfg={}'.format(best_val, best_cfg))
-    _my_globals['knn-lm[scores]'] = (best_val, best_cfg)
-    #
-    print('')
-    #
-    keys = ['original', 'knn-lm', 'knn-lm[optimal]', 'knn-lm[rerank]', 'knn-lm[scores]']
-    base_val = _my_globals[keys[0]][0]
-    print('{:>16} {:.4f}'.format(keys[0], base_val))
-    for k in keys[1:]:
-        val, cfg = _my_globals[k]
-        print('{:>16} {:.4f} {:.4f} {}'.format(k, val, val - base_val, cfg))
 
 
 class Rerank(object):
@@ -558,14 +322,15 @@ class Dstore:
         self.src_pos = np.memmap(os.path.join(path, 'annotation_src_pos.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
         # read pos dict
-        self.idx2pos = []
+        self.idx2tag = []
         print('Reading POS Vocab...')
         path_pos_dict = os.path.join(path, 'pos_dict.txt')
         with open(path_pos_dict) as f:
             for line in f:
                 print(line.strip())
                 idx, sym, _ = line.strip().split()
-                self.idx2pos.append(idx)
+                self.idx2tag.append(sym)
+        self.tag2idx = {v: k for k, v in enumerate(self.idx2tag)}
         print('done\n')
 
 
