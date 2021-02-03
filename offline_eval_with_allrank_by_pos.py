@@ -73,7 +73,7 @@ class RunKNNLM:
         p_ = torch.from_numpy(p).float()
         original_ppl = EvalUtil.eval_ppl(p_)
 
-        best_val = original_ppl
+        best_val = None
         best_cfg = None
         limits_to_check = 8
         limit_size = self.k // limits_to_check
@@ -95,7 +95,7 @@ class RunKNNLM:
                             coeff)
                 ppl = EvalUtil.eval_ppl(new_p)
                 #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
-                if ppl < best_val:
+                if best_val is None or ppl < best_val:
                     best_val = ppl
                     best_cfg = (lim, coeff)
         out = {}
@@ -145,7 +145,7 @@ class RunOptimal:
         p_ = torch.from_numpy(p).float()
         original_ppl = EvalUtil.eval_ppl(p_)
 
-        best_val = original_ppl
+        best_val = None
         best_cfg = None
         limits_to_check = 8
         limit_size = self.k // limits_to_check
@@ -167,7 +167,7 @@ class RunOptimal:
                             coeff)
                 ppl = EvalUtil.eval_ppl(new_p)
                 #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
-                if ppl < best_val:
+                if best_val is None or ppl < best_val:
                     best_val = ppl
                     best_cfg = (lim, coeff)
         out = {}
@@ -217,56 +217,61 @@ def main(args):
     tgt_pos = np.concatenate([src_pos[1:], np.zeros(1).reshape(1, 1)], axis=0) # HACK
 
     freq_lst = [10, 100, 1000, 10000, -1]
+    target_tag_lst = [None,
+        ['NN', 'NNP', 'NNPS', 'NNS'],
+        ['VB', 'VBD', 'VBG', 'VBN', 'VBP', 'VBZ'],
+    ]
 
-    target_tag = ['NN', 'NNP', 'NNPS', 'NNS']
-    target_tag_idx = [dstore.tag2idx[t] for t in target_tag]
+    for target_tag in target_tag_lst:
+        target_tag_idx = [dstore.tag2idx[t] for t in target_tag] if target_tag is not None else None
 
-    for top_freq in freq_lst:
-        skip_tags = True
-        mask = np.zeros(tgts.shape[0], dtype=np.int)
-        mask[query_id] = 1
-        mask = mask == 1
-        if top_freq > 0:
-            is_top_freq = np.logical_and(tgts.reshape(-1) >= 4, tgts.reshape(-1) < top_freq + 4)
-            mask = np.logical_and(mask, is_top_freq)
-        if target_tag_idx is not None and not skip_tags:
-            is_tag = np.isin(tgt_pos.reshape(-1), target_tag_idx)
-            mask_ = np.logical_and(mask, is_tag)
-            if mask_.sum() == 0:
-                skip_tags = True
-                print('WARNING: Skipping tags.')
-            else:
-                mask = mask_
-        assert mask.sum() > 0
+        for top_freq in freq_lst:
+            print('RESULTS, top_freq={}, tag={}'.format(top_freq, target_tag))
 
-
-        mask_b = np.ones(query_id.shape[0], dtype=int) == 1
-        tgts_ = tgts[query_id]
-        tgt_pos_ = tgts[query_id]
-        if top_freq > 0:
-            mask_b[tgts_.reshape(-1) < 4] = False
-            mask_b[tgts_.reshape(-1) >= top_freq + 4] = False
-        if target_tag_idx is not None and not skip_tags:
-            is_tag = np.isin(tgt_pos_.reshape(-1), target_tag_idx).reshape(-1)
-            mask_ = np.logical_and(mask_b, is_tag)
-            if mask_.sum() == 0:
-                skip_tags = True
-                print('WARNING: Skipping tags.')
-            else:
-                mask_b = mask_
-        assert mask_b.sum() > 0
+            skip_tags = False
+            mask = np.zeros(tgts.shape[0], dtype=np.int)
+            mask[query_id] = 1
+            mask = mask == 1
+            if top_freq > 0:
+                is_top_freq = np.logical_and(tgts.reshape(-1) >= 4, tgts.reshape(-1) < top_freq + 4)
+                mask = np.logical_and(mask, is_top_freq)
+            if target_tag_idx is not None and not skip_tags:
+                is_tag = np.isin(tgt_pos.reshape(-1), target_tag_idx)
+                mask_ = np.logical_and(mask, is_tag)
+                if mask_.sum() == 0:
+                    skip_tags = True
+                    print('WARNING: Skipping tags.')
+                else:
+                    mask = mask_
+            assert mask.sum() > 0
 
 
-        print('RESULTS, top_freq={}, tag={}'.format(top_freq, target_tag))
-        out_baseline = RunOriginal().run(dstore, vocab, mask=mask, mask_b=mask_b)
-        baseline = out_baseline['ppl']
-        print_results(out_baseline, None)
-        print_results(RunKNNLM(dict(k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-        print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-        print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-        print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-        print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-        print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            mask_b = np.ones(query_id.shape[0], dtype=int) == 1
+            tgts_ = tgts[query_id]
+            tgt_pos_ = tgt_pos[query_id]
+            if top_freq > 0:
+                mask_b[tgts_.reshape(-1) < 4] = False
+                mask_b[tgts_.reshape(-1) >= top_freq + 4] = False
+            if target_tag_idx is not None and not skip_tags:
+                is_tag = np.isin(tgt_pos_.reshape(-1), target_tag_idx)
+                mask_ = np.logical_and(mask_b, is_tag)
+                if mask_.sum() == 0:
+                    skip_tags = True
+                    print('WARNING: Skipping tags.')
+                else:
+                    mask_b = mask_
+            assert mask_b.sum() > 0
+
+
+            out_baseline = RunOriginal().run(dstore, vocab, mask=mask, mask_b=mask_b)
+            baseline = out_baseline['ppl']
+            print_results(out_baseline, None)
+            print_results(RunKNNLM(dict(k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
 
     sys.exit()
 
