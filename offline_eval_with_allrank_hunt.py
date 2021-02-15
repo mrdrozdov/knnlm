@@ -98,6 +98,24 @@ class RunKNNLM:
                 if best_val is None or ppl < best_val:
                     best_val = ppl
                     best_cfg = (lim, coeff)
+
+
+        # Once more with best setting
+        lim, coeff = best_cfg
+        if True:
+            dist_ = dist[:, :lim]
+            knn_tgts_ = knn_tgts[:, :lim]
+            knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+            knn_p_ = torch.from_numpy(knn_p).float()
+            new_p = EvalUtil.combine_knn_and_vocab_probs(
+                        knn_p_,
+                        p_,
+                        coeff)
+            ppl = EvalUtil.eval_ppl(new_p)
+            #cat_ = torch.cat([p_, knn_p_], dim=1) + np.log(0.5)
+            #lse_ = torch.logsumexp(cat_, dim=1)
+            #ppl_ = EvalUtil.eval_ppl(lse_)
+
         out = {}
         out['ppl'] = best_val
         out['cfg'] = str(tuple(best_cfg))
@@ -106,6 +124,9 @@ class RunKNNLM:
         out['desc'] = 'knn-lm[{}]'.format(desc)
         if tag is not None:
             out['desc'] += '[{}]'.format(tag)
+        out['p'] = p
+        out['knn_p'] = knn_p
+        out['mask'] = mask
         return out
 
 
@@ -178,6 +199,9 @@ class RunOptimal:
         out['desc'] = 'optimal[{}]'.format(desc)
         if tag is not None:
             out['desc'] += '[{}]'.format(tag)
+        out['p'] = p
+        out['knn_p'] = knn_p
+        out['mask'] = mask
         return out
 
 
@@ -262,16 +286,89 @@ def main(args):
 
             out_baseline = RunOriginal().run(dstore, vocab, mask=mask, mask_b=mask_b)
             baseline = out_baseline['ppl']
-            print_results(out_baseline, None)
-            print_results(RunKNNLM(dict(k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            knnlm = RunKNNLM(dict(k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b)
+            ours = RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b)
+
+            p = np.exp(knnlm['p'])
+            knn_p = np.exp(knnlm['knn_p'])
+            ours_p = np.exp(ours['knn_p'])
+            diff_p_knnlm = p - knn_p
+            diff_p_ours = p - ours_p
+            diff_knnlm_ours = knn_p - ours_p
+            tgts_ = tgts[mask]
+            pos_ = tgt_pos[mask].astype(np.int)
+            prefix = get_prefix(tgts, mask, n=10, unk=0)
+
+            txt_prefix = get_text(prefix, vocab)
+            txt_target = get_text(tgts_.reshape(-1, 1), vocab)
+
+            print((diff_knnlm_ours < 0).sum())
+            print((diff_knnlm_ours == 0).sum())
+
+            #sys.exit()
+            sort_a = p.reshape(-1).tolist()
+            sort_b = diff_knnlm_ours.reshape(-1).tolist()
+            sort_c = np.arange(tgts_.shape[0])
+            sort_index = [(a, b, c) for a, b, c in zip(sort_a, sort_b, sort_c)]
+
+            def sortby(index):
+                def mykey(x):
+                    p, diff = x[:2]
+                    return (-round(p, 1), diff)
+                for a, b, c in sorted(index, key=mykey):
+                    yield c
+
+
+            #for i_tgt in range(tgts_.shape[0]):
+            for i_tgt in sortby(sort_index):
+                if args.comp_baseline_knn == 'knn':
+                    if diff_p_knnlm[i_tgt, 0] <= 0:
+                        continue
+                else:
+                    if diff_p_knnlm[i_tgt, 0] >= 0:
+                        continue
+
+                if args.comp_knn_ours == 'ours':
+                    if diff_knnlm_ours[i_tgt, 0] >= 0:
+                        continue
+                else:
+                    if diff_knnlm_ours[i_tgt, 0] <= 0:
+                        continue
+                pos = dstore.idx2tag[pos_[i_tgt, 0]]
+                print('{:>10.4f} {:>10.4f} {:>10.4f} {:>10.4f} {} => {} {}'.format(
+                    p[i_tgt, 0],
+                    diff_p_knnlm[i_tgt, 0],
+                    diff_p_ours[i_tgt, 0],
+                    diff_knnlm_ours[i_tgt, 0],
+                    ' '.join(txt_prefix[i_tgt]),
+                    txt_target[i_tgt][0],
+                    pos
+                    ))
+            #mask = knnlm['mask']
+            #tgts_ = tgts[mask]
+            sys.exit()
 
     sys.exit()
 
+
+def get_text(arr, vocab):
+    assert len(arr.shape) == 2
+    rows = arr.shape[0]
+    out = []
+    for i in range(rows):
+        s = [vocab.symbols[idx] for idx in arr[i].tolist()]
+        out.append(s)
+    return out
+
+
+def get_prefix(tgts, mask, n=None, unk=None):
+    tmp = np.zeros(tgts.shape, dtype=np.int)
+    out = []
+    for i in range(n):
+        tmp[:i+1] = unk
+        tmp[i+1:] = tgts[:-(i+1)]
+        out.append(tmp[mask].reshape(-1, 1))
+    return np.concatenate(out[::-1], axis=1)
 
 
 class Rerank(object):
@@ -584,6 +681,8 @@ if __name__ == '__main__':
     # examine
     parser.add_argument('--k', default=1024, type=int)
     parser.add_argument('--k-freq', default=-1, type=int)
+    parser.add_argument('--comp-baseline-knn', default='knn', type=str)
+    parser.add_argument('--comp-knn-ours', default='ours', type=str)
     args = parser.parse_args()
 
     print(args)

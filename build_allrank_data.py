@@ -14,22 +14,32 @@ def main(args):
 
     os.system('mkdir -p {}'.format(args.output))
 
-    print('TRAIN')
-    out = build_split(args.tr_dstore, args.tr_dstore_size, args.tr_lookup, args.tr_lookup_k, args.k, args.ntrain,
-            shuffle=not args.tr_noshuffle, balance=args.tr_balance, should_filter_top=True, require_both=True)
-    path = os.path.join(args.output, 'train.txt')
-    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
 
-    print('VALID')
-    out = build_split(args.va_dstore, args.va_dstore_size, args.va_lookup, args.va_lookup_k, args.k, args.nvalid,
-            shuffle=args.va_shuffle, balance=False)
-    path = os.path.join(args.output, 'vali.txt')
-    write_allrank_data(path, out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt'])
+    if args.test_only:
+        out = build_split(args.va_dstore, args.va_dstore_size, args.va_lookup, args.va_lookup_k, args.k, args.nvalid,
+                shuffle=False, balance=False, has_row=False)
+        path = os.path.join(args.output, 'train.txt')
+        write_allrank_data(path, out)
+        path = os.path.join(args.output, 'vali.txt')
+        write_allrank_data(path, out)
+
+    else:
+        print('TRAIN')
+        out = build_split(args.tr_dstore, args.tr_dstore_size, args.tr_lookup, args.tr_lookup_k, args.k, args.ntrain,
+                shuffle=not args.tr_noshuffle, balance=args.tr_balance, should_filter_top=True, require_both=True)
+        path = os.path.join(args.output, 'train.txt')
+        write_allrank_data(path, out)
+
+        print('VALID')
+        out = build_split(args.va_dstore, args.va_dstore_size, args.va_lookup, args.va_lookup_k, args.k, args.nvalid,
+                shuffle=args.va_shuffle, balance=False)
+        path = os.path.join(args.output, 'vali.txt')
+        write_allrank_data(path, out)
 
 
-def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, n, shuffle=True, balance=False, should_filter_top=False, require_both=False):
+def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, n, shuffle=True, balance=False, should_filter_top=False, require_both=False, has_row=True):
     split_dstore = Dstore(split_dstore_path, split_dstore_size, 1024)
-    split_dstore.initialize(has_row=True)
+    split_dstore.initialize(has_row=has_row)
     split_dstore.add_neighbors(lookup_path, lookup_k)
 
     vocab = Dictionary()
@@ -39,12 +49,14 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     index = np.arange(split_dstore.tgts.shape[0])
     if shuffle:
         np.random.shuffle(index)
-    index = index[:n]
+    if n > 0:
+        index = index[:n]
 
     src = split_dstore.src[index]
     tgts = split_dstore.tgts[index]
     knns = split_dstore.knns[index, :lookup_k]
     dist = split_dstore.dist[index, :lookup_k] # dist is sorted from hi to lo
+    p = split_dstore.prob[index]
     knn_tgts = split_dstore.knn_tgts[index, :lookup_k]
     qids = split_dstore.row[index]
     size = qids.shape[0]
@@ -65,6 +77,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
         dist = dist[mask]
         knn_tgts = knn_tgts[mask]
         qids = qids[mask]
+        p = p[mask]
         size = qids.shape[0]
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
@@ -106,6 +119,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
         dist = _filter(dist, pos_order, neg_order)
         knn_tgts = _filter(knn_tgts, pos_order, neg_order)
         qids = qids[has_both]
+        p = p[has_both]
         size = qids.shape[0]
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
@@ -127,6 +141,7 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
 
     if require_both:
         qids = qids[has_both]
+        p = p[has_both]
         dist = dist[has_both]
         label = label[has_both]
         knns = knns[has_both]
@@ -168,6 +183,8 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     out['label'] = label
     out['feat_idx'] = knns
     out['feat_tgt'] = knn_tgts
+    out['dist'] = dist
+    out['p'] = p
     out['q_src'] = src
     out['q_tgt'] = tgts
 
@@ -175,7 +192,11 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
     return out
 
 
-def write_allrank_data(path, qids, label, feat_idx, query_src, query_tgt, feat_tgt):
+def write_allrank_data(path, out):
+    qids, label, feat_idx, query_src, query_tgt, feat_tgt = \
+        out['qids'], out['label'], out['feat_idx'], out['q_src'], out['q_tgt'], out['feat_tgt']
+    p = out['p']
+    dist = out['dist']
     print('writing {} with feat_idx shape {}'.format(path, feat_idx.shape))
     size, k, _ = label.shape
     with open(path, 'w') as f:
@@ -187,7 +208,7 @@ def write_allrank_data(path, qids, label, feat_idx, query_src, query_tgt, feat_t
                 q_src = int(query_src[i_slate])
                 q_tgt = int(query_tgt[i_slate])
                 x_tgt = int(feat_tgt[i_slate, i_k, 0])
-                f.write('{} qid:{} 0:{} 1:{} 2:{} 3:{}'.format(y, q_id, x_id, q_src, q_tgt, x_tgt))
+                f.write('{} qid:{} 0:{} 1:{} 2:{} 3:{} 4:{} 5:{}'.format(y, q_id, x_id, q_src, p[i_slate, 0], dist[i_slate, i_k, 0], q_tgt, x_tgt))
                 f.write('\n')
 
 
@@ -385,6 +406,8 @@ class Dstore:
         self.prob = np.memmap(os.path.join(path, 'dstore_prob.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, 1))
         if has_row:
             self.row = np.memmap(os.path.join(path, 'dstore_row.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
+        else:
+            self.row = np.arange(self.dstore_size).reshape(-1, 1)
         self._initialized = True
 
     def add_neighbors(self, path, k):
@@ -420,6 +443,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', default=None, type=str)
     parser.add_argument('--seed', default=1231, type=int)
     parser.add_argument('--k', default=256, type=int)
+    parser.add_argument('--test-only', action='store_true')
     args = parser.parse_args()
 
     print(args)

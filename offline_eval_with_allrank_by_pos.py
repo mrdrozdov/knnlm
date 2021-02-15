@@ -55,6 +55,8 @@ class RunOriginal:
 class RunKNNLM:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.flip_distance = False
+        self.flip_score = False
         for k, v in cfg.items():
             setattr(self, k, v)
 
@@ -69,6 +71,9 @@ class RunKNNLM:
             dist = dstore.dist[:, :self.k].copy()[mask]
             knn_tgts = dstore.knn_tgts[:, :self.k].copy()[mask]
             tgts = dstore.tgts[:].copy()[mask]
+
+        if self.flip_distance:
+            dist = -dist
 
         p_ = torch.from_numpy(p).float()
         original_ppl = EvalUtil.eval_ppl(p_)
@@ -115,6 +120,8 @@ class RunOptimal:
         # defaults
         self.rerank = False
         self.use_scores = False
+        self.flip_distance = False
+        self.flip_score = False
         # override
         for k, v in cfg.items():
             setattr(self, k, v)
@@ -130,6 +137,8 @@ class RunOptimal:
             dist = dstore.dist[:, :self.k].copy()[mask]
             knn_tgts = dstore.knn_tgts[:, :self.k].copy()[mask]
             tgts = dstore.tgts[:].copy()[mask]
+        if self.flip_distance:
+            dist = -dist
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
         new_order = Rerank.optimal_order(label, dist)
         dist = np.take_along_axis(dist, new_order, axis=1)
@@ -141,6 +150,8 @@ class RunOptimal:
             knn_tgts = np.take_along_axis(knn_tgts, new_order, axis=1)
         if self.use_scores:
             dist = dstore.allrank.scores[:, :self.k].copy()[mask_b]
+            if self.flip_score:
+                dist = -dist
 
         p_ = torch.from_numpy(p).float()
         original_ppl = EvalUtil.eval_ppl(p_)
@@ -186,7 +197,8 @@ def main(args):
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
     dstore.add_allrank(args.allrank, args.allrank_size, args.allrank_k)
-    dstore.add_annotations(args.dstore)
+    if args.pos:
+        dstore.add_annotations(args.dstore)
 
     tgts = dstore.tgts[:]
     knn_tgts = dstore.knn_tgts[:, :args.k]
@@ -213,14 +225,15 @@ def main(args):
     print('WARNING: Manually setting query id.')
     query_id = query_id - 100000
     assert query_id.min() >= 0
-    src_pos = dstore.src_pos[:]
-    tgt_pos = np.concatenate([src_pos[1:], np.zeros(1).reshape(1, 1)], axis=0) # HACK
 
-    freq_lst = [10, 100, 1000, 10000, -1]
-    target_tag_lst = [None,
-        ['NN', 'NNP', 'NNPS', 'NNS'],
-        ['VB', 'VBD', 'VBG', 'VBN', 'VBP', 'VBZ'],
-    ]
+    freq_lst = [10, 100, 1000, 10000, -1][::-1]
+    target_tag_lst = [None]
+
+    if args.pos:
+        src_pos = dstore.src_pos[:]
+        tgt_pos = np.concatenate([src_pos[1:], np.zeros(1).reshape(1, 1)], axis=0) # HACK
+        target_tag_lst.append(['NN', 'NNP', 'NNPS', 'NNS'])
+        target_tag_lst.append(['VB', 'VBD', 'VBG', 'VBN', 'VBP', 'VBZ'])
 
     for target_tag in target_tag_lst:
         target_tag_idx = [dstore.tag2idx[t] for t in target_tag] if target_tag is not None else None
@@ -248,11 +261,11 @@ def main(args):
 
             mask_b = np.ones(query_id.shape[0], dtype=int) == 1
             tgts_ = tgts[query_id]
-            tgt_pos_ = tgt_pos[query_id]
             if top_freq > 0:
                 mask_b[tgts_.reshape(-1) < 4] = False
                 mask_b[tgts_.reshape(-1) >= top_freq + 4] = False
             if target_tag_idx is not None and not skip_tags:
+                tgt_pos_ = tgt_pos[query_id]
                 is_tag = np.isin(tgt_pos_.reshape(-1), target_tag_idx)
                 mask_ = np.logical_and(mask_b, is_tag)
                 if mask_.sum() == 0:
@@ -262,16 +275,19 @@ def main(args):
                     mask_b = mask_
             assert mask_b.sum() > 0
 
+            fd = args.flip_distance
+            fs = args.flip_score
 
             out_baseline = RunOriginal().run(dstore, vocab, mask=mask, mask_b=mask_b)
             baseline = out_baseline['ppl']
             print_results(out_baseline, None)
-            print_results(RunKNNLM(dict(k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunKNNLM(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
 
     sys.exit()
 
@@ -541,7 +557,7 @@ class EvalUtil:
 
         tgts = torch.from_numpy(tgts).long().view(-1)
         dists = torch.from_numpy(dists).float().squeeze(-1)
-        dists = -dists
+        #dists = -dists
         probs = torch.log_softmax(dists, dim=-1)
 
         index_mask = torch.eq(torch.from_numpy(knn_tgts).long().squeeze(-1), tgts.unsqueeze(-1)).float()
@@ -587,6 +603,9 @@ if __name__ == '__main__':
     # examine
     parser.add_argument('--k', default=1024, type=int)
     parser.add_argument('--k-freq', default=-1, type=int)
+    parser.add_argument('--flip-distance', action='store_true')
+    parser.add_argument('--flip-score', action='store_true')
+    parser.add_argument('--pos', action='store_true')
     args = parser.parse_args()
 
     print(args)
