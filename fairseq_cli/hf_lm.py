@@ -17,6 +17,7 @@ import json
 
 import torch
 import numpy as np
+from tqdm import tqdm
 
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 
@@ -161,9 +162,12 @@ def main(parsed_args):
     task = tasks.setup_task(parsed_args)
 
     # Load model.
-    hf_tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
-    hf_model = AutoModelForMaskedLM.from_pretrained("facebook/bart-base")
-    # TODO
+    hf_tokenizer = AutoTokenizer.from_pretrained(parsed_args.hf_model)
+    if parsed_args.hf_enc_mode == 'masked':
+        hf_model = AutoModelForMaskedLM.from_pretrained(parsed_args.hf_model)
+    elif parsed_args.hf_enc_mode == 'causal':
+        hf_model = AutoModelForCausalLM.from_pretrained(parsed_args.hf_model)
+
     args = copy.deepcopy(parsed_args)
 
     # reduce tokens per sample by the required context window size
@@ -187,7 +191,7 @@ def main(parsed_args):
         max_tokens=args.max_tokens or 36000,
         max_sentences=args.max_sentences,
         max_positions=utils.resolve_max_positions(*[
-            1024
+            parsed_args.hf_max_position
         ]),
         ignore_invalid_inputs=True,
         num_shards=args.num_shards,
@@ -250,7 +254,8 @@ def main(parsed_args):
 
         dstore_idx = 0
         dstore_full = False
-        for ex_i, sample in enumerate(t):
+        num_tokens = 0
+        for ex_i, sample in tqdm(enumerate(t), desc='encode'):
             if 'net_input' not in sample:
                 continue
 
@@ -277,23 +282,7 @@ def main(parsed_args):
                 hf_batch['word_id'].append(hf_word_id)
                 hf_batch['mask'].append(hf_mask)
 
-            # TODO: Padding.
-            # TODO: Should work for CausalLM or MaskedLM styles.
-
-            demo_src = hf_tokenizer.convert_ids_to_tokens(hf_batch['src_tokens'][-1])
-            demo_target = hf_batch['hf_raw_target']
-
-            import ipdb; ipdb.set_trace()
-
-            sample = utils.move_to_cuda(sample) if use_cuda else sample
-
-            gen_timer.start()
-            if args.knnlm:
-                hypos, extra = scorer.generate(models, sample, knn_dstore=knn_dstore)
-            else:
-                hypos, extra = scorer.generate(models, sample)
-            #save_extra.append(extra)
-            gen_timer.stop(sample['ntokens'])
+                num_tokens += len(hf_src_tokens)
 
             if args.save_knnlm_dstore and not dstore_full:
                 _keys = extra['keys']
@@ -331,68 +320,6 @@ def main(parsed_args):
                 if dstore_full:
                     print('Datastore is full with {} items.'.format(args.dstore_size))
 
-            for i, hypos_i in enumerate(hypos):
-                hypo = hypos_i[0]
-
-                sample_id = sample['id'][i]
-
-                tokens = hypo['tokens']
-                tgt_len = tokens.numel()
-                pos_scores = hypo['positional_scores'].float()
-
-                if args.add_bos_token:
-                    assert hypo['tokens'][0].item() == task.target_dictionary.bos()
-                    tokens = tokens[1:]
-                    pos_scores = pos_scores[1:]
-
-                skipped_toks = 0
-                if bpe_toks is not None:
-                    for i in range(tgt_len - 1):
-                        if tokens[i].item() in bpe_toks:
-                            skipped_toks += 1
-                            pos_scores[i + 1] += pos_scores[i]
-                            pos_scores[i] = 0
-
-                #inf_scores = pos_scores.eq(float('inf')) | pos_scores.eq(float('-inf'))
-                #if inf_scores.any():
-                #    logger.info(
-                #        'skipping tokens with inf scores:',
-                #        task.target_dictionary.string(tokens[inf_scores.nonzero()])
-                #    )
-                #    pos_scores = pos_scores[(~inf_scores).nonzero()]
-                score_sum += pos_scores.sum().cpu()
-                count += pos_scores.numel() - skipped_toks
-
-                if args.output_word_probs or args.output_word_stats:
-                    w = ''
-                    word_prob = []
-                    is_bpe = False
-                    for i in range(len(tokens)):
-                        w_ind = tokens[i].item()
-                        w += task.source_dictionary[w_ind]
-                        if bpe_toks is not None and w_ind in bpe_toks:
-                            w = w[:-bpe_len]
-                            is_bpe = True
-                        else:
-                            word_prob.append((w, pos_scores[i].item()))
-
-                            next_prob = None
-                            ind = i + 1
-                            while ind < len(tokens):
-                                if pos_scores[ind].item() != 0:
-                                    next_prob = pos_scores[ind]
-                                    break
-                                ind += 1
-
-                            word_stats.setdefault(w, WordStat(w, is_bpe)).add(pos_scores[i].item(), next_prob)
-                            is_bpe = False
-                            w = ''
-                    if args.output_word_probs:
-                        logger.info(
-                            str(int(sample_id)) + " "
-                            + ('\t'.join('{} [{:2f}]'.format(x[0], x[1]) for x in word_prob))
-                        )
-
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})
 
@@ -405,17 +332,7 @@ def main(parsed_args):
         print("Keys", dstore_keys.shape, dstore_keys.dtype)
         print("Vals", dstore_vals.shape, dstore_vals.dtype)
 
-    avg_nll_loss = -score_sum / count / math.log(2)  # convert to base 2
-    logger.info('Evaluated {} tokens in {:.1f}s ({:.2f} tokens/s)'.format(
-        gen_timer.n, gen_timer.sum, 1. / gen_timer.avg
-    ))
-    logger.info('Loss (base 2): {:.4f}, Perplexity: {:.2f}'.format(
-        avg_nll_loss, 2**avg_nll_loss
-    ))
-
-    if args.output_word_stats:
-        for ws in sorted(word_stats.values(), key=lambda x: x.count, reverse=True):
-            logger.info(ws)
+    logger.info('done with {} tokens'.format(num_tokens))
 
 
 def cli_main():
