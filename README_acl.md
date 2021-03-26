@@ -86,11 +86,11 @@ This should output the perplexity w/o KNN, and multiple perplexity values w/ KNN
 ```
 python split_data.py \
     --dstore dstore_valid \
-    --dstore_size 217646 \
-    --output from_dstore_valid \
-    --tr_size 100000 \
-    --va_size 10000 \
-    --te_size 107646
+    --dstore-size 217646 \
+    --output from_dstore_valid-20210214 \
+    --tr-size 100000 \
+    --va-size 100000 \
+    --te-size 7646
 ```
 
 # Step 4b. Cache vectors and write allrank data.
@@ -100,29 +100,65 @@ First, cache the neighbors for the training data.
 ```
 python offline_eval.py \
     --bsize 1000 \
-    --dstore from_dstore_valid/tr \
+    --dstore from_dstore_valid-20210214/tr \
     --dstore-size 100000 \
     --knn-lookup-mode unique \
     --knn-dstore dstore_train \
     --knn-dstore-size 103225485 \
     --knn-sim-func "do_not_recomp_l2" \
     --knn --k 1024 \
-    --save --save-to from_dstore_valid/lookup_tr
+    --save --save-to from_dstore_valid-20210214/lookup_tr
+
+python offline_eval.py \
+    --bsize 1000 \
+    --dstore from_dstore_valid-20210214/va \
+    --dstore-size 100000 \
+    --knn-lookup-mode unique \
+    --knn-dstore dstore_train \
+    --knn-dstore-size 103225485 \
+    --knn-sim-func "do_not_recomp_l2" \
+    --knn --k 1024 \
+    --save --save-to from_dstore_valid-20210214/lookup_va
+
+python offline_eval.py \
+    --bsize 1000 \
+    --dstore from_dstore_test-20210214 \
+    --dstore-size 245569 \
+    --knn-lookup-mode unique \
+    --knn-dstore dstore_train \
+    --knn-dstore-size 103225485 \
+    --knn-sim-func "do_not_recomp_l2" \
+    --knn --k 1024 \
+    --save --save-to from_dstore_test-20210214/lookup
+
+# For some reason, only 217646 tokens were computed for test.
 ```
 
 Then sample from here to create the new data.
 
 ```
 python build_allrank_data.py \
-    --feat-idx \
-    --dstore dstore_train \
-    --dstore-size 103225485 \
-    --lookup lookup_train \
-    --lookup-k 64 \
-    --lookup-sparse \
-    --output allrank_train \
-    --ntrain 10000 \
-    --nvalid 1000 \
+    --output from_dstore_valid-20210214/allrank \
+    --tr-dstore from_dstore_valid-20210214/tr \
+    --tr-dstore-size 100000 \
+    --tr-lookup from_dstore_valid-20210214/lookup_tr \
+    --tr-lookup-k 1024 \
+    --ntrain 30000 \
+    --va-dstore from_dstore_valid-20210214/va \
+    --va-dstore-size 100000 \
+    --va-lookup from_dstore_valid-20210214/lookup_va \
+    --va-lookup-k 1024 \
+    --nvalid 10000 \
+    --va-shuffle \
+    --k 64
+
+python build_allrank_data.py --test-only \
+    --output from_dstore_test-20210214/allrank \
+    --va-dstore from_dstore_test-20210214 \
+    --va-dstore-size 245569 \
+    --va-lookup from_dstore_test-20210214/lookup \
+    --va-lookup-k 1024 \
+    --nvalid -1 \
     --k 64
 ```
 

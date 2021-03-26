@@ -41,9 +41,6 @@ def main(args):
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
-    dstore.add_allrank(args.allrank, args.allrank_size, args.allrank_k)
-    if args.pos:
-        dstore.add_annotations(args.dstore)
 
     tgts = dstore.tgts[:]
     src = np.zeros(tgts.shape, dtype=tgts.dtype) # NOTE: First src is wrong.
