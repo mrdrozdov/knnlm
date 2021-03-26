@@ -19,7 +19,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM
 
 from fairseq import checkpoint_utils, options, progress_bar, tasks, utils
 from fairseq.data import LMContextWindowDataset
@@ -168,6 +168,17 @@ def main(parsed_args):
     elif parsed_args.hf_enc_mode == 'causal':
         hf_model = AutoModelForCausalLM.from_pretrained(parsed_args.hf_model)
 
+    if use_cuda:
+        hf_model.cuda()
+
+    device = next(hf_model.parameters()).device
+
+    check_input_ids = hf_tokenizer('hello world')['input_ids']
+    add_cls_token = check_input_ids[0] == hf_tokenizer.cls_token_id
+    add_sep_token = check_input_ids[-1] == hf_tokenizer.sep_token_id
+    print('add_cls_token = {} {} {}'.format(add_cls_token, hf_tokenizer.cls_token, hf_tokenizer.cls_token_id))
+    print('add_sep_token = {} {} {}'.format(add_sep_token, hf_tokenizer.sep_token, hf_tokenizer.sep_token_id))
+
     args = copy.deepcopy(parsed_args)
 
     # reduce tokens per sample by the required context window size
@@ -186,12 +197,14 @@ def main(parsed_args):
     )
     logger.info('{} {} {} examples'.format(args.data, args.gen_subset, len(dataset)))
 
+    model_max_length = min(hf_tokenizer.model_max_length, parsed_args.hf_max_position)
+
     itr = task.get_batch_iterator(
         dataset=dataset,
         max_tokens=args.max_tokens or 36000,
         max_sentences=args.max_sentences,
         max_positions=utils.resolve_max_positions(*[
-            parsed_args.hf_max_position
+            model_max_length
         ]),
         ignore_invalid_inputs=True,
         num_shards=args.num_shards,
@@ -234,23 +247,24 @@ def main(parsed_args):
 
         if args.save_knnlm_dstore:
             print('keytype being saved:', args.knn_keytype)
-            if args.dstore_fp16:
-                print('Saving fp16')
-                dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
-                dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, 1))
-                dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
-                dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
-                dstore_src = np.memmap(args.dstore_mmap+'_src.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
-            else:
-                print('Saving fp32')
-                dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
-                dstore_prob = np.memmap(args.dstore_mmap+'_prob.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, 1))
-                dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
-                dstore_tgts = np.memmap(args.dstore_mmap+'_tgts.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
-                dstore_src = np.memmap(args.dstore_mmap+'_src.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
+            dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, hf_model.config.d_model))
+            dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
 
         if args.save_extra:
             writer = Writer(outdir='demo-out', max_size=args.save_extra_max_size, k=args.k, vec_size=1024)
+
+        def pad(x, pad_id=-1):
+            max_len = max([len(xx) for xx in x])
+            x = [xx + [pad_id] * (max_len - len(xx)) for xx in x]
+            return x
+
+        def batchify(batch):
+            new_batch = {}
+            new_batch['input_ids'] = torch.tensor(pad(batch['src_tokens'], hf_tokenizer.pad_token_id), dtype=torch.long, device=device)
+            new_batch['context_mask'] = torch.tensor(pad(batch['mask'], -1), dtype=torch.long, device=device)
+            new_batch['word_id'] = torch.tensor(pad(batch['word_id'], -1), dtype=torch.long, device=device)
+            new_batch['target'] = torch.tensor(pad(batch['target'], -1), dtype=torch.long, device=device)
+            return new_batch
 
         dstore_idx = 0
         dstore_full = False
@@ -267,14 +281,26 @@ def main(parsed_args):
                 raw_text = [task_dataset.vocab[tt] for tt in tok]
                 hf_src_tokens, hf_target, hf_raw_target, hf_raw_text, hf_word_id, hf_mask = [], [], [], [], [], []
                 for i_w in range(len(raw_text) - 1):
+
                     w = raw_text[i_w]
                     tok_ = hf_tokenizer.encode(w, add_special_tokens=False)
+                    if i_w == 0 and add_cls_token:
+                        if tok_[0] != hf_tokenizer.cls_token_id:
+                            tok_ = [hf_tokenizer.cls_token_id] + tok_
+
+                    if len(hf_src_tokens) + len(tok_) > model_max_length:
+                        break
+
                     hf_src_tokens += tok_
                     hf_raw_text += hf_tokenizer.convert_ids_to_tokens(tok_)
                     hf_word_id += [i_w] * len(tok_)
                     hf_mask += [0] * (len(tok_) - 1) + [1]
-                    hf_target += [tok[i_w + 1]]
+                    hf_target += [tok[i_w + 1]] * len(tok_)
                     hf_raw_target += [raw_text[i_w + 1]]
+
+                assert len(hf_src_tokens) == len(hf_target)
+                assert len(hf_src_tokens) == len(hf_word_id)
+                assert len(hf_src_tokens) == len(hf_mask)
 
                 hf_batch['src_tokens'].append(hf_src_tokens)
                 hf_batch['target'].append(hf_target) # This is indexed by KNN-LM tokenizer.
@@ -284,41 +310,37 @@ def main(parsed_args):
 
                 num_tokens += len(hf_src_tokens)
 
-            if args.save_knnlm_dstore and not dstore_full:
-                _keys = extra['keys']
-                shape = _keys.shape
-                if shape[0] == len(hypos) * args.tokens_per_sample or args.no_min_context:
-                    if dstore_idx + shape[0] > args.dstore_size:
-                        shape = [args.dstore_size - dstore_idx]
-                        dstore_full = True
-                    if args.dstore_fp16:
-                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
-                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int16)
-                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.float16)
-                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int16)
-                        dstore_src[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int16)
-                    else:
-                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = _keys[:shape[0]].view(
-                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int)
-                        dstore_prob[dstore_idx:shape[0]+dstore_idx] = extra['probs'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.float32)
-                        dstore_tgts[dstore_idx:shape[0]+dstore_idx] = extra['target'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int)
-                        dstore_src[dstore_idx:shape[0]+dstore_idx] = extra['src_tokens'][:shape[0]].view(
-                            -1, 1).cpu().numpy().astype(np.int)
+            hf_batch_ = batchify(hf_batch)
 
-                    dstore_idx += shape[0]
-                else:
-                    print('Skipping this one with shape', shape)
-                if dstore_full:
-                    print('Datastore is full with {} items.'.format(args.dstore_size))
+            model_output = hf_model(hf_batch_['input_ids'], output_hidden_states=True)
+
+            h = model_output['hidden_states'][-1]
+
+            assert h.shape[:2] == hf_batch_['input_ids'].shape[:2]
+
+            if args.save_knnlm_dstore and not dstore_full:
+
+                flat_h = h.view(-1, hf_model.config.d_model)
+                mask_ = hf_batch_['context_mask'].view(-1) == 1
+                keys_ = flat_h[mask_]
+                vals_ = hf_batch_['target'].view(-1, 1)[mask_]
+
+                shape = keys_.shape
+                if dstore_idx + shape[0] > args.dstore_size:
+                    shape = [args.dstore_size - dstore_idx]
+                    dstore_full = True
+
+                keys_ = keys_[:shape[0]]
+                vals_ = vals_[:shape[0]]
+
+                assert keys_.shape[0] == vals_.shape[0]
+
+                dstore_keys[dstore_idx:shape[0]+dstore_idx] = keys_.cpu().numpy().astype(np.float32)
+                dstore_vals[dstore_idx:shape[0]+dstore_idx] = vals_.cpu().numpy().astype(np.int)
+
+                dstore_idx += shape[0]
+            if dstore_full:
+                print('Datastore is full with {} items.'.format(args.dstore_size))
 
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})

@@ -500,6 +500,14 @@ def add_eval_lm_args(parser):
                        help='directory to save data')
     group.add_argument('--save-extra-max-size', default=None, type=int,
                        help='max_size for extra data')
+    # Extra arguments for hf.
+    group.add_argument('--hf-model', default='facebook/bart-base', type=str,
+                       help='name of huggingface model')
+    group.add_argument('--hf-enc-mode', default='causal', type=str,
+                       help='encoder mode such as `masked` or `causal`')
+    group.add_argument('--hf-max-position', default=4096, type=int,
+                       help='max position for hf model')
+    group.add_argument('--skip-encode', action='store_true')
     # fmt: on
 
 
