@@ -57,6 +57,7 @@ class RunKNNLM:
         self.cfg = cfg
         self.flip_distance = False
         self.flip_score = False
+        self.use_coeff = False
         for k, v in cfg.items():
             setattr(self, k, v)
 
@@ -82,27 +83,62 @@ class RunKNNLM:
         best_cfg = None
         limits_to_check = 8
         limit_size = self.k // limits_to_check
-        limits_to_check_lst = [i * limit_size for i in range(1, limits_to_check)]
+        limits_to_check_lst = [(i + 1) * limit_size for i in range(limits_to_check)]
         if not self.find_best_lim:
             limits_to_check_lst = [self.k]
         coeff_lst = np.arange(20) / 20
+        if self.use_coeff:
+            coeff = dstore.allrank.coeff[:].copy()[mask_b]
 
+        if self.use_coeff:
+            for lim in limits_to_check_lst:
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+                knn_p_ = torch.from_numpy(knn_p).float()
 
-        for lim in limits_to_check_lst:
-            dist_ = dist[:, :lim]
-            knn_tgts_ = knn_tgts[:, :lim]
-            knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
-            knn_p_ = torch.from_numpy(knn_p).float()
-            for coeff in coeff_lst[1:]:
                 new_p = EvalUtil.combine_knn_and_vocab_probs(
                             knn_p_,
                             p_,
-                            coeff)
+                            np.clip(coeff.round(), 0.01, 0.2))
                 ppl = EvalUtil.eval_ppl(new_p)
-                #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
+
                 if best_val is None or ppl < best_val:
                     best_val = ppl
-                    best_cfg = (lim, coeff)
+                    best_cfg = (lim, 'use')
+
+        else:
+            for lim in limits_to_check_lst:
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+                knn_p_ = torch.from_numpy(knn_p).float()
+                for coeff in coeff_lst[1:]:
+                    new_p = EvalUtil.combine_knn_and_vocab_probs(
+                                knn_p_,
+                                p_,
+                                coeff.item())
+                    ppl = EvalUtil.eval_ppl(new_p)
+                    #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
+                    if best_val is None or ppl < best_val:
+                        best_val = ppl
+                        best_cfg = (lim, coeff)
+        if False:
+            for lim in limits_to_check_lst:
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+                knn_p_ = torch.from_numpy(knn_p).float()
+                for coeff in coeff_lst[1:]:
+                    new_p = EvalUtil.combine_knn_and_vocab_probs(
+                                knn_p_,
+                                p_,
+                                coeff.item())
+                    ppl = EvalUtil.eval_ppl(new_p)
+                    #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
+                    if best_val is None or ppl < best_val:
+                        best_val = ppl
+                        best_cfg = (lim, coeff)
         out = {}
         out['ppl'] = best_val
         out['cfg'] = str(tuple(best_cfg))
@@ -113,6 +149,100 @@ class RunKNNLM:
             out['desc'] += '[{}]'.format(tag)
         return out
 
+
+class RunRerank:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        # defaults
+        self.rerank = False
+        self.use_scores = False
+        self.flip_distance = False
+        self.flip_score = False
+        self.use_coeff = False
+        # override
+        for k, v in cfg.items():
+            setattr(self, k, v)
+
+    def run(self, dstore, vocab, mask=None, mask_b=None, tag=None):
+        if mask is None:
+            p = dstore.prob[:].copy()
+            dist = dstore.dist[:, :self.k].copy()
+            knn_tgts = dstore.knn_tgts[:, :self.k].copy()
+            tgts = dstore.tgts[:].copy()
+        else:
+            p = dstore.prob[:].copy()[mask]
+            dist = dstore.dist[:, :self.k].copy()[mask]
+            knn_tgts = dstore.knn_tgts[:, :self.k].copy()[mask]
+            tgts = dstore.tgts[:].copy()[mask]
+        if self.flip_distance:
+            dist = -dist
+        label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
+        if self.rerank:
+            new_order = dstore.allrank.knn_rank[:][mask_b]
+            assert new_order.shape[0] == dist.shape[0]
+            dist = np.take_along_axis(dist, new_order, axis=1)
+            knn_tgts = np.take_along_axis(knn_tgts, new_order, axis=1)
+        if self.use_scores:
+            dist = dstore.allrank.scores[:, :self.k].copy()[mask_b]
+            if self.flip_score:
+                dist = -dist
+        if self.use_coeff:
+            coeff = dstore.allrank.coeff[:].copy()[mask_b]
+
+        p_ = torch.from_numpy(p).float()
+        original_ppl = EvalUtil.eval_ppl(p_)
+
+        best_val = None
+        best_cfg = None
+        limits_to_check = 8
+        limit_size = self.k // limits_to_check
+        limits_to_check_lst = [(i + 1) * limit_size for i in range(limits_to_check)]
+        if not self.find_best_lim:
+            limits_to_check_lst = [self.k]
+        coeff_lst = np.arange(20) / 20
+
+        if self.use_coeff:
+            for lim in limits_to_check_lst:
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+                knn_p_ = torch.from_numpy(knn_p).float()
+
+                new_p = EvalUtil.combine_knn_and_vocab_probs(
+                            knn_p_,
+                            p_,
+                            np.clip(coeff.round(), 0.01, 0.2))
+                ppl = EvalUtil.eval_ppl(new_p)
+
+                if best_val is None or ppl < best_val:
+                    best_val = ppl
+                    best_cfg = (lim, 'use')
+
+        else:
+            for lim in limits_to_check_lst:
+                dist_ = dist[:, :lim]
+                knn_tgts_ = knn_tgts[:, :lim]
+                knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
+                knn_p_ = torch.from_numpy(knn_p).float()
+                for coeff in coeff_lst[1:]:
+                    new_p = EvalUtil.combine_knn_and_vocab_probs(
+                                knn_p_,
+                                p_,
+                                coeff.item())
+                    ppl = EvalUtil.eval_ppl(new_p)
+                    #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
+                    if best_val is None or ppl < best_val:
+                        best_val = ppl
+                        best_cfg = (lim, coeff)
+        out = {}
+        out['ppl'] = best_val
+        out['cfg'] = str(tuple(best_cfg))
+        desc = self.cfg.copy()
+        desc['n'] = p.shape[0]
+        out['desc'] = 'rerank[{}]'.format(desc)
+        if tag is not None:
+            out['desc'] += '[{}]'.format(tag)
+        return out
 
 class RunOptimal:
     def __init__(self, cfg):
@@ -160,7 +290,7 @@ class RunOptimal:
         best_cfg = None
         limits_to_check = 8
         limit_size = self.k // limits_to_check
-        limits_to_check_lst = [i * limit_size for i in range(1, limits_to_check)]
+        limits_to_check_lst = [(i + 1) * limit_size for i in range(limits_to_check)]
         if not self.find_best_lim:
             limits_to_check_lst = [self.k]
         coeff_lst = np.arange(20) / 20
@@ -175,7 +305,7 @@ class RunOptimal:
                 new_p = EvalUtil.combine_knn_and_vocab_probs(
                             knn_p_,
                             p_,
-                            coeff)
+                            coeff.item())
                 ppl = EvalUtil.eval_ppl(new_p)
                 #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
                 if best_val is None or ppl < best_val:
@@ -275,6 +405,8 @@ def main(args):
                     mask_b = mask_
             assert mask_b.sum() > 0
 
+            #TODO: Add more checks for mask and mask_b.
+
             fd = args.flip_distance
             fs = args.flip_score
 
@@ -282,12 +414,16 @@ def main(args):
             baseline = out_baseline['ppl']
             print_results(out_baseline, None)
             print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=False, use_coeff=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
             print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=1024, find_best_lim=True, use_coeff=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
             print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=False)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
             print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
-            print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunKNNLM(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, use_coeff=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            #print_results(RunOptimal(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunRerank(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunRerank(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
+            print_results(RunRerank(dict(flip_distance=fd, flip_score=fs, k=args.allrank_k, find_best_lim=True, rerank=True, use_scores=True, use_coeff=True)).run(dstore, vocab, mask=mask, mask_b=mask_b), baseline)
 
     sys.exit()
 
@@ -368,6 +504,7 @@ class DstoreAllrank:
         out.knn_rank = np.memmap(os.path.join(path, 'out_vali_knn_rank.npy'), dtype=np.int, mode='r', shape=(size, k, 1))
         out.scores = np.memmap(os.path.join(path, 'out_vali_scores.npy'), dtype=np.float32, mode='r', shape=(size, k, 1))
         out.query_id = np.memmap(os.path.join(path, 'out_vali_query_id.npy'), dtype=np.int, mode='r', shape=(size, 1))
+        out.coeff = np.memmap(os.path.join(path, 'out_vali_coeff.npy'), dtype=np.float32, mode='r', shape=(size, 1))
         return out
 
 
@@ -572,10 +709,14 @@ class EvalUtil:
 
     @staticmethod
     def combine_knn_and_vocab_probs(knn_p, vocab_p, coeff):
+        if isinstance(coeff, (int, float)):
+            coeff = torch.FloatTensor(1).fill_(coeff)
+        elif not isinstance(coeff, torch.Tensor):
+            coeff = torch.from_numpy(coeff).float()
         combine_probs = torch.stack([vocab_p, knn_p], dim=0)
         coeffs = torch.ones_like(combine_probs)
-        coeffs[0] = np.log(1 - coeff)
-        coeffs[1] = np.log(coeff)
+        coeffs[0] = torch.log(1 - coeff)
+        coeffs[1] = torch.log(coeff)
         curr_prob = torch.logsumexp(combine_probs + coeffs, dim=0)
 
         return curr_prob

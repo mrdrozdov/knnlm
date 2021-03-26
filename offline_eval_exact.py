@@ -82,6 +82,7 @@ class RunKNNLM:
         if self.flip_distance:
             dist = -dist
 
+        index = None
         if self.sort:
             assert len(dist.shape) == 3
             index = np.argsort(dist, axis=1)[:, ::-1]
@@ -125,6 +126,7 @@ class RunKNNLM:
         out['knn_p'] = best_knn_p
         out['p'] = p
         out['ppl'] = best_val
+        out['index'] = index
         out['cfg'] = str(tuple(best_cfg))
         desc = self.cfg.copy()
         desc['n'] = p.shape[0]
@@ -186,9 +188,9 @@ def main(args):
     out_baseline = RunOriginal().run(dstore, vocab)
     baseline = out_baseline['ppl']
     print_results(out_baseline, None)
-    res_approx = RunKNNLM(dict(k=1024, find_best_lim=False, use_exact=False, flip_distance=False)).run(dstore, vocab)
+    res_approx = RunKNNLM(dict(k=1024, find_best_lim=False, use_exact=False, flip_distance=False, sort=True)).run(dstore, vocab)
     print_results(res_approx, baseline)
-    res_exact  = RunKNNLM(dict(k=1024, find_best_lim=False, use_exact=True, flip_distance=True)).run(dstore, vocab)
+    res_exact  = RunKNNLM(dict(k=1024, find_best_lim=False, use_exact=True, flip_distance=True, sort=True)).run(dstore, vocab)
     print_results(res_exact, baseline)
 
     bin_0 = [None] + [10**i for i in range(1, 7)]
@@ -244,220 +246,55 @@ def main(args):
         out['baseline-ppl'] = baseline_ppl
         print(json.dumps(out))
 
+        ######
+
+        def pick(d, keys, mask=None):
+            if mask is not None:
+                return [d[k][mask] for k in keys]
+            return [d[k] for k in keys]
+
+        mask = mask.reshape(-1)
+        tgts_ = tgts[mask]
+        k = 128
+        #
+        index_a, dist_a, knn_tgts_a = pick(res_approx, ['index', 'dist', 'knn_tgts'], mask)
+        index_e, dist_e, knn_tgts_e = pick(res_exact, ['index', 'dist', 'knn_tgts'], mask)
+
+        res_overlap = collections.defaultdict(list)
+        res_ppl = {}
+        for k in [16, 64, 256]:
+            for i in range(index_a.shape[0]):
+                #a_, e_ = knn_tgts_a[i, :k].flatten().tolist(), knn_tgts_e[i, :k].flatten().tolist()
+                a_, e_ = index_a[i, :k].flatten().tolist(), index_e[i, :k].flatten().tolist()
+                overlap = len(set.intersection(set(a_), set(e_)))
+                res_overlap[k].append(overlap)
+
+        out = collections.OrderedDict()
+        for k, v in res_overlap.items():
+            out['overlap-{}'.format(k)] = np.mean(v)
+        print(json.dumps(out))
+
         #print('piv=[{}:{}), freq=[{}:{}], n={}/{}, sofar={}'.format(
         #    piv_start, piv_end, lo_freq, hi_freq, n, mask.shape[0], sofar))
 
     sys.exit()
 
-    # Compare Approx to Exact
 
-    print('COMPARE approx to exact')
-
-    coeff = 0.25
-    freq_rank_list = [2**i for i in range(5, 21)]
-    print('common')
-    for freq_rank in freq_rank_list:
-        mask = tgts <= freq_rank
-        # approx
-        knn_p_, p_ = res_approx['knn_p'], res_approx['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        approx_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        approx_ppl = EvalUtil.eval_ppl(approx_p).item()
-        # exact
-        knn_p_, p_ = res_exact['knn_p'], res_exact['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        exact_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        exact_ppl = EvalUtil.eval_ppl(exact_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = approx_ppl - exact_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    print('rare')
-    for freq_rank in freq_rank_list:
-        mask = tgts > freq_rank
-        if mask.sum().item() == 0:
-            continue
-        # approx
-        knn_p_, p_ = res_approx['knn_p'], res_approx['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        approx_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        approx_ppl = EvalUtil.eval_ppl(approx_p).item()
-        # exact
-        knn_p_, p_ = res_exact['knn_p'], res_exact['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        exact_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        exact_ppl = EvalUtil.eval_ppl(exact_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = approx_ppl - exact_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    # Compare to Baseline
-
-    print('\n\n\n')
-
-    print('COMPARE to baseline (approx)')
-
-    coeff = 0.25
-    freq_rank_list = [2**i for i in range(5, 21)]
-    print('common')
-    for freq_rank in freq_rank_list:
-        mask = tgts <= freq_rank
-        # approx
-        knn_p_, p_ = res_approx['knn_p'], res_approx['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        approx_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        approx_ppl = EvalUtil.eval_ppl(approx_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = baseline_ppl - approx_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    print('rare')
-    for freq_rank in freq_rank_list:
-        mask = tgts > freq_rank
-        if mask.sum().item() == 0:
-            continue
-        # approx
-        knn_p_, p_ = res_approx['knn_p'], res_approx['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        approx_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        approx_ppl = EvalUtil.eval_ppl(approx_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = baseline_ppl - approx_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    print('\n\n\n')
-
-    print('COMPARE to baseline (exact)')
-
-    coeff = 0.25
-    freq_rank_list = [2**i for i in range(5, 21)]
-    print('common')
-    for freq_rank in freq_rank_list:
-        mask = tgts <= freq_rank
-        # exact
-        knn_p_, p_ = res_exact['knn_p'], res_exact['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        exact_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        exact_ppl = EvalUtil.eval_ppl(exact_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = baseline_ppl - exact_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    print('rare')
-    for freq_rank in freq_rank_list:
-        mask = tgts > freq_rank
-        if mask.sum().item() == 0:
-            continue
-        # exact
-        knn_p_, p_ = res_exact['knn_p'], res_exact['p']
-        knn_p_, p_ = knn_p_[mask], p_[mask]
-        knn_p_ = torch.from_numpy(knn_p_).float()
-        p_ = torch.from_numpy(p_).float()
-        exact_p = EvalUtil.combine_knn_and_vocab_probs(
-                    knn_p_,
-                    p_,
-                    coeff)
-        exact_ppl = EvalUtil.eval_ppl(exact_p).item()
-        # baseline
-        baseline_ppl = EvalUtil.eval_ppl(p_).item()
-        # main
-        n = mask.sum().item()
-        out = collections.OrderedDict()
-        out['freq_rank'] = freq_rank
-        out['n'] = n
-        out['diff-ppl'] = baseline_ppl - exact_ppl
-        out['approx-ppl'] = approx_ppl
-        out['exact-ppl'] = exact_ppl
-        out['baseline-ppl'] = baseline_ppl
-        print(json.dumps(out))
-
-    import ipdb; ipdb.set_trace()
-    pass
-
-
-    sys.exit()
-
-
+def edit_distance(x0, x1):
+    m = len(x0)
+    n = len(x1)
+    d = [[i] for i in range(1, m + 1)]   # d matrix rows
+    d.insert(0, list(range(0, n + 1)))   # d matrix columns
+    for j in range(1, n + 1):
+        for i in range(1, m + 1):
+            if x0[i - 1] == x1[j - 1]:
+                substitutionCost = 0
+            else:
+                substitutionCost = 1
+            d[i].insert(j, min(d[i - 1][j] + 1,
+                               d[i][j - 1] + 1,
+                               d[i - 1][j - 1] + substitutionCost))
+    return d[-1][-1]
 
 
 class Dstore:

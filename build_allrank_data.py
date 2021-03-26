@@ -151,33 +151,6 @@ def build_split(split_dstore_path, split_dstore_size, lookup_path, lookup_k, k, 
 
     size = label.shape[0]
 
-    # get optimal order
-    print('get optimal order')
-
-    ## positives - sort from hi to lo
-    positive_dist = dist.copy()
-    positive_dist[label == 0] = -np.inf
-    positive_dist_sorted = np.sort(positive_dist, axis=1)[:, ::-1]
-    positive_order = positive_dist.argsort(axis=1)[:, ::-1]
-
-    ## negatives - sort from lo to hi
-    negative_dist = dist.copy()
-    negative_dist[label == 1] = -np.inf
-    negative_dist_sorted = np.sort(negative_dist, axis=1)
-    negative_order = negative_dist.argsort(axis=1)
-
-    # set positives and negatives
-    new_order = np.zeros((size, k, 1)).astype(np.int)
-    new_order[positive_dist_sorted > -np.inf] = positive_order[positive_dist_sorted > -np.inf]
-    new_order[negative_dist_sorted > -np.inf] = negative_order[negative_dist_sorted > -np.inf]
-
-    assert np.all(np.unique(new_order, return_counts=True)[1] == size)
-
-    print('re-order')
-    label = np.take_along_axis(label, new_order, axis=1)
-    knns = np.take_along_axis(knns, new_order, axis=1)
-    knn_tgts = np.take_along_axis(knn_tgts, new_order, axis=1)
-
     out = {}
     out['qids'] = qids
     out['label'] = label
