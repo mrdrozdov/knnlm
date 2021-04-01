@@ -186,36 +186,73 @@ def main(args):
         return torch.cat(keys, 0)
 
     def get_queries(hf_tokens, word_ids, select_ids, skip_agg=False):
-        word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
         if use_cuda:
             hf_tokens = hf_tokens.cuda()
+        hf_tokens = hf_tokens.expand(4, hf_tokens.shape[1]) # TODO
         model_output = hf_model(hf_tokens, output_hidden_states=True)
         if skip_agg:
             return None
-        vecs = model_output['hidden_states'][-1]
+        vecs = model_output['hidden_states'][-1][:1]
         vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
+        word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
         select_mask = word_ids == select_ids
         vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
         # TODO: Only sum where needed.
         queries = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
         return queries
 
+    def get_batched_queries(batch_size=4):
+        def it_():
+            out = None
+            for start, end in get_batch_indices(batch_size=128, n=knns.shape[0], verbose=True):
+                if out is None:
+                    out = collections.defaultdict(list)
+                val_index = np.arange(start, end)
+                tokens, select_ids = build_query_window(val_index, vals, context_size=256) # context size measured by knn-lm tokenization.
+                select_ids = torch.from_numpy(select_ids).view(-1, 1)
+                word_ids, hf_tokens = hf_tokenize(tokens)
+                out['word_ids'].append(word_ids)
+                out['select_ids'].append(select_ids)
+                out['hf_tokens'].append(hf_tokens)
+                if len(out['word_ids']) == batch_size:
+                    yield out
+                    out = None
+            if out is not None:
+                yield out
+
+        def batchify(x):
+            maxlen = max([xx.shape[1] for xx in x])
+            batch_size = sum([xx.shape[0] for xx in x])
+            batch = torch.LongTensor(batch_size, maxlen).fill_(0)
+            offset = 0
+            for xx in x:
+                b, l = xx.shape
+                batch[offset:offset+b, :l] = xx
+                offset += b
+            if use_cuda:
+                batch = batch.cuda()
+            return batch
+
+        for out in it_():
+            word_ids_, select_ids_, hf_tokens = pick(out, ['word_ids', 'select_ids', 'hf_tokens'])
+            hf_tokens = batchify(hf_tokens)
+            model_output = hf_model(hf_tokens, output_hidden_states=True)
+
+            for i_b, (word_ids, select_ids) in enumerate(zip(word_ids_, select_ids_)):
+                vecs = model_output['hidden_states'][-1][i_b:i_b+1]
+                vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
+                # TODO: This block is slow...
+                padding = torch.tensor([-1] * (hf_tokens.shape[1] - word_ids.shape[1]), dtype=torch.long).view(1, -1)
+                word_ids = torch.cat([word_ids, padding], 1)
+                word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
+                select_mask = word_ids == select_ids
+                vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
+                # TODO: Only sum where needed.
+                queries = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
+                yield queries
+
     if True:
-        all_queries = []
-        for start, end in get_batch_indices(batch_size=128, n=knns.shape[0], verbose=True):
-
-            # Queries
-            val_index = np.arange(start, end)
-            tokens, select_ids = build_query_window(val_index, vals, context_size=256) # context size measured by knn-lm tokenization.
-            select_ids = torch.from_numpy(select_ids).view(-1, 1)
-            word_ids, hf_tokens = hf_tokenize(tokens)
-
-            assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
-
-            queries = get_queries(hf_tokens, word_ids, select_ids)
-
-            all_queries.append(queries.cpu())
-        all_queries = torch.cat(all_queries, 0)
+        all_queries = torch.cat([x.cpu() for x in get_batched_queries(batch_size=32)], 0)
 
         u_offset = 0
         u_max = u[u_offset]
