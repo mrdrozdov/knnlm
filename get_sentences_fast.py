@@ -48,6 +48,8 @@ def npy_copy(x):
 def main(args):
     use_cuda = torch.cuda.is_available()
 
+    torch.set_grad_enabled(False)
+
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
@@ -78,7 +80,8 @@ def main(args):
     #    knns_ = knns_.cuda()
     #print(knns_.shape)
     #u, inv, counts = torch.unique(knns_, return_inverse=True, return_counts=True)
-    #u, inv = np.unique(knns, return_inverse=True)
+    u, inv = np.unique(knns, return_inverse=True)
+    inv = inv.reshape(*knns.shape)
 
     # load model
     #hf_tokenizer = AutoTokenizer.from_pretrained('facebook/bart-base')
@@ -86,19 +89,22 @@ def main(args):
     hf_model = AutoModelForMaskedLM.from_pretrained('roberta-base')
     if use_cuda:
         hf_model.cuda()
+    device = next(hf_model.parameters()).device
 
-    output_dist = np.memmap('robert_dist.npy', dtype=np.float32, mode='w+', shape=dist.shape)
+    output_dist = np.memmap('roberta_dist.npy', dtype=np.float32, mode='w+', shape=dist.shape)
+    output_done = np.memmap('roberta_done.npy', dtype=np.int, mode='w+', shape=dist.shape)
+    output_done[:] = 0
 
     # helper funcs
     def pick(d, keys):
         return [d[k] for k in keys]
 
-    def get_batch_indices(batch_size, n, shuffle=False):
+    def get_batch_indices(batch_size, n, shuffle=False, verbose=False):
         assert shuffle == False
         num_batches = n // batch_size
         if num_batches * batch_size < n:
             num_batches += 1
-        for i in range(num_batches):
+        for i in tqdm(range(num_batches), disable=not verbose):
             start = i * batch_size
             end = min(start + batch_size, n)
             yield start, end
@@ -119,11 +125,13 @@ def main(args):
         val = val.flatten()
         pane = (context_size - val.shape[0]) // 2
         w_l = (val.min() - 1 - np.arange(pane)[::-1]).reshape(1, -1)
-        w_r = (val.max() - 1 - np.arange(pane)[::-1]).reshape(1, -1)
+        w_r = (val.max() + 1 + np.arange(pane)).reshape(1, -1)
         w_mid = val.reshape(1, -1)
         w = np.concatenate([w_l, w_mid, w_r], axis=1)
+        pad_mask = np.logical_or(w < 0, w >= all_val.shape[0])
+        w[pad_mask] = 0
         tok = all_val[w.flatten()].reshape(*w.shape)
-        tok[w < 0] = pad
+        tok[pad_mask] = pad
         select_ids = np.arange(w_mid.shape[1]) + w_l.shape[1]
         return tok, select_ids
 
@@ -168,8 +176,7 @@ def main(args):
             hf_tokens_ = hf_tokens[start:end]
             if use_cuda:
                 hf_tokens_ = hf_tokens_.cuda()
-            with torch.no_grad():
-                model_output = hf_model(hf_tokens_, output_hidden_states=True)
+            model_output = hf_model(hf_tokens_, output_hidden_states=True)
             vecs = model_output['hidden_states'][-1]
             word_ids_ = word_ids[start:end]
             select_mask_ = select_mask[start:end]
@@ -178,14 +185,15 @@ def main(args):
             keys.append(keys_)
         return torch.cat(keys, 0)
 
-    def get_queries(hf_tokens, word_ids, select_ids):
+    def get_queries(hf_tokens, word_ids, select_ids, skip_agg=False):
         word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
         if use_cuda:
             hf_tokens = hf_tokens.cuda()
-        with torch.no_grad():
-            model_output = hf_model(hf_tokens, output_hidden_states=True)
+        model_output = hf_model(hf_tokens, output_hidden_states=True)
+        if skip_agg:
+            return None
         vecs = model_output['hidden_states'][-1]
-        vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2])
+        vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
         select_mask = word_ids == select_ids
         vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
         # TODO: Only sum where needed.
@@ -193,14 +201,10 @@ def main(args):
         return queries
 
     if True:
-        new_dist = []
-        old_dist = []
-        lm_probs = []
-        gt_target = []
-        knn_target = []
-        for start, end in tqdm(get_batch_indices(batch_size=8, n=knns.shape[0])):
+        all_queries = []
+        for start, end in get_batch_indices(batch_size=128, n=knns.shape[0], verbose=True):
+
             # Queries
-            #vals_ = vals[start:end]
             val_index = np.arange(start, end)
             tokens, select_ids = build_query_window(val_index, vals, context_size=256) # context size measured by knn-lm tokenization.
             select_ids = torch.from_numpy(select_ids).view(-1, 1)
@@ -208,63 +212,57 @@ def main(args):
 
             assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
 
-            with torch.no_grad():
-                queries = get_queries(hf_tokens, word_ids, select_ids)
+            queries = get_queries(hf_tokens, word_ids, select_ids)
+
+            all_queries.append(queries.cpu())
+        all_queries = torch.cat(all_queries, 0)
+
+        u_offset = 0
+        u_max = u[u_offset]
+        for start, end in get_batch_indices(batch_size=128, n=train_vals.shape[0], verbose=True):
+
+            batch_u, batch_u_offset = [], []
+            if start <= u_max:
+                while u_max < end:
+                    batch_u.append(u_max)
+                    batch_u_offset.append(u_offset)
+                    u_offset += 1
+                    u_max = u[u_offset]
+
+            # Skip batch if not relevant.
+            if len(batch_u) == 0:
+                continue
+
+            batch_u_index = np.array([idx - start for idx in batch_u])
+            assert batch_u_index.min() >= 0
 
             # Keys
-            knns_ = knns[start:end]
-            tokens, select_ids = build_window(knns_, train_vals, context_size=256) # context size measured by knn-lm tokenization.
+            val_index = np.arange(start, end)
+            tokens, select_ids = build_query_window(val_index, train_vals, context_size=256) # context size measured by knn-lm tokenization.
+            select_ids = select_ids[batch_u_index]
             select_ids = torch.from_numpy(select_ids).view(-1, 1)
             word_ids, hf_tokens = hf_tokenize(tokens)
 
             assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
 
-            with torch.no_grad():
-                keys = get_keys(hf_tokens, word_ids, select_ids)
+            keys = get_queries(hf_tokens, word_ids, select_ids)
 
-            new_dist_ = -1 * torch.sum(queries.unsqueeze(1) - keys.view(knns_.shape[0], knns_.shape[1], -1)**2, dim=-1)
-            new_dist_ = new_dist_.cpu()
-            new_dist.append(new_dist_)
-
-            # write output
-            output_dist[start:end] = new_dist_.view(knns_.shape[0], knns_.shape[1], 1)
-
-            old_dist_ = torch.from_numpy(dist[start:end])
-            old_dist.append(old_dist_)
-
-            lm_probs.append(torch.from_numpy(prob[start:end]).float())
-            gt_target.append(tgts[start:end])
-            knn_target.append(knn_tgts[start:end])
+            for i_u, u_ in enumerate(batch_u):
+                offset_ = batch_u_offset[i_u]
+                inv_mask = inv == offset_
+                inv_mask_flat = inv_mask.any(axis=1).reshape(inv_mask.shape[0])
+                key_ = keys[i_u].to(device)
+                queries_ = all_queries[inv_mask_flat].to(device)
+                d_ = -1 * torch.sum((queries_ - key_.unsqueeze(0))**2, dim=-1)
+                output_dist[inv_mask] = d_.cpu().numpy()
+                output_done[inv_mask] = 1
+        import ipdb; ipdb.set_trace()
+        pass
 
 
-            if False:
-                # eval
-                coeff = 0.25
-                p_ = torch.cat(lm_probs, 0)
-                original_ppl = EvalUtil.eval_ppl(p_)
-
-                tgts_ = np.concatenate(gt_target, axis=0)
-                knn_tgts_ = np.concatenate(knn_target, axis=0)
-
-                # old
-                dist_ = torch.cat(old_dist, 0).numpy()
-                knn_p = EvalUtil.get_knn_log_prob(tgts_, dist_, knn_tgts_)
-                knn_p_ = torch.from_numpy(knn_p).float()
-                old_p = EvalUtil.combine_knn_and_vocab_probs(knn_p_, p_, coeff)
-                old_ppl = EvalUtil.eval_ppl(old_p)
-                # new
-                dist_ = torch.cat(new_dist, 0).numpy()
-                knn_p = EvalUtil.get_knn_log_prob(tgts_, dist_, knn_tgts_)
-                knn_p_ = torch.from_numpy(knn_p).float()
-                new_p = EvalUtil.combine_knn_and_vocab_probs(knn_p_, p_, coeff)
-                new_ppl = EvalUtil.eval_ppl(new_p)
-
-                print('@' * 10)
-                print('{:.3f} {:.3f} {:.3f}'.format(original_ppl, old_ppl, new_ppl))
-                print('@' * 10)
-
-
-
+            # TODO: Find relevant keys.
+            # TODO: Make a sparse update using distance.
+            # new_dist_ = -1 * torch.sum((queries.unsqueeze(1) - keys.view(knns_.shape[0], knns_.shape[1], -1))**2, dim=-1)
 
 
     if False:
