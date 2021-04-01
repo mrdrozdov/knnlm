@@ -115,6 +115,19 @@ def main(args):
         select_ids = np.array([pane] * n)
         return tok, select_ids
 
+    def build_query_window(val, all_val, context_size=512, pad=0):
+        val = val.flatten()
+        pane = (context_size - val.shape[0]) // 2
+        w_l = (val.min() - 1 - np.arange(pane)[::-1]).reshape(1, -1)
+        w_r = (val.max() - 1 - np.arange(pane)[::-1]).reshape(1, -1)
+        w_mid = val.reshape(1, -1)
+        w = np.concatenate([w_l, w_mid, w_r], axis=1)
+        tok = all_val[w.flatten()].reshape(*w.shape)
+        tok[w < 0] = pad
+        select_ids = np.arange(w_mid.shape[1]) + w_l.shape[1]
+        return tok, select_ids
+
+
     cache_tokens = {}
     def cached_tokenize(w):
         if w not in cache_tokens:
@@ -162,8 +175,22 @@ def main(args):
             select_mask_ = select_mask[start:end]
             vecs[select_mask_[:, :, None].expand_as(vecs) == False] = 0
             keys_ = vecs.sum(1) / select_mask_.sum(1).view(-1, 1).to(vecs.device)
-            keys.append(keys_.cpu())
+            keys.append(keys_)
         return torch.cat(keys, 0)
+
+    def get_queries(hf_tokens, word_ids, select_ids):
+        word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
+        if use_cuda:
+            hf_tokens = hf_tokens.cuda()
+        with torch.no_grad():
+            model_output = hf_model(hf_tokens, output_hidden_states=True)
+        vecs = model_output['hidden_states'][-1]
+        vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2])
+        select_mask = word_ids == select_ids
+        vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
+        # TODO: Only sum where needed.
+        queries = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
+        return queries
 
     if True:
         new_dist = []
@@ -175,14 +202,14 @@ def main(args):
             # Queries
             #vals_ = vals[start:end]
             val_index = np.arange(start, end)
-            tokens, select_ids = build_window(val_index, vals, context_size=256) # context size measured by knn-lm tokenization.
+            tokens, select_ids = build_query_window(val_index, vals, context_size=256) # context size measured by knn-lm tokenization.
             select_ids = torch.from_numpy(select_ids).view(-1, 1)
             word_ids, hf_tokens = hf_tokenize(tokens)
 
             assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
 
             with torch.no_grad():
-                queries = get_keys(hf_tokens, word_ids, select_ids)
+                queries = get_queries(hf_tokens, word_ids, select_ids)
 
             # Keys
             knns_ = knns[start:end]
@@ -196,6 +223,7 @@ def main(args):
                 keys = get_keys(hf_tokens, word_ids, select_ids)
 
             new_dist_ = -1 * torch.sum(queries.unsqueeze(1) - keys.view(knns_.shape[0], knns_.shape[1], -1)**2, dim=-1)
+            new_dist_ = new_dist_.cpu()
             new_dist.append(new_dist_)
 
             # write output
