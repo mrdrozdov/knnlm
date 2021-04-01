@@ -33,7 +33,7 @@ import sys
 import numpy as np
 import torch
 
-from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM, AutoModel
 
 from tqdm import tqdm
 
@@ -58,13 +58,14 @@ def main(args):
     knn_dstore.initialize()
 
     k = 16 # TODO: Use full k.
+    limit = 20000
     # TODO: Re-rank according to exact distance first.
-    knns = npy_copy(dstore.knns[:, :k])
-    dist = npy_copy(dstore.dist[:, :k])
-    knn_tgts = npy_copy(dstore.knn_tgts[:, :k])
-    prob = npy_copy(dstore.prob[:])
-    vals = npy_copy(dstore.vals[:])
-    tgts = npy_copy(dstore.tgts[:])
+    knns =         npy_copy(dstore.knns[:limit, :k])
+    dist =         npy_copy(dstore.dist[:limit, :k])
+    knn_tgts = npy_copy(dstore.knn_tgts[:limit, :k])
+    prob = npy_copy(dstore.prob[:limit])
+    vals = npy_copy(dstore.vals[:limit])
+    tgts = npy_copy(dstore.tgts[:limit])
 
     vocab = Dictionary()
     vocab.add_from_file(args.vocab)
@@ -86,7 +87,7 @@ def main(args):
     # load model
     #hf_tokenizer = AutoTokenizer.from_pretrained('facebook/bart-base')
     hf_tokenizer = AutoTokenizer.from_pretrained('roberta-base')
-    hf_model = AutoModelForMaskedLM.from_pretrained('roberta-base')
+    hf_model = AutoModel.from_pretrained('roberta-base')
     if use_cuda:
         hf_model.cuda()
     device = next(hf_model.parameters()).device
@@ -251,48 +252,112 @@ def main(args):
                 queries = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
                 yield queries
 
+    def get_batched_keys(batch_size=4):
+        def it_():
+            #########
+
+            u_offset = 0
+            u_max = u[u_offset]
+            out = None
+            for start, end in get_batch_indices(batch_size=128, n=train_vals.shape[0], verbose=True):
+
+                batch_u, batch_u_offset = [], []
+                if start <= u_max:
+                    while u_max < end:
+                        batch_u.append(u_max)
+                        batch_u_offset.append(u_offset)
+                        if u_offset == len(u) - 1:
+                            break
+                        u_offset += 1
+                        u_max = u[u_offset]
+
+                # Skip batch if not relevant.
+                if len(batch_u) == 0:
+                    continue
+
+                batch_u_index = np.array([idx - start for idx in batch_u])
+                assert batch_u_index.min() >= 0
+
+                # Keys
+                val_index = np.arange(start, end)
+                tokens, select_ids = build_query_window(val_index, train_vals, context_size=256) # context size measured by knn-lm tokenization.
+                select_ids = select_ids[batch_u_index]
+                select_ids = torch.from_numpy(select_ids).view(-1, 1)
+                word_ids, hf_tokens = hf_tokenize(tokens)
+
+                assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
+
+                if out is None:
+                    out = collections.defaultdict(list)
+                out['word_ids'].append(word_ids)
+                out['select_ids'].append(select_ids)
+                out['hf_tokens'].append(hf_tokens)
+                out['batch_u'].append(batch_u)
+                out['batch_u_offset'].append(batch_u_offset)
+                if len(out['word_ids']) == batch_size:
+                    yield out
+                    out = None
+            if out is not None:
+                yield out
+
+        def batchify(x):
+            maxlen = max([xx.shape[1] for xx in x])
+            batch_size = sum([xx.shape[0] for xx in x])
+            batch = torch.LongTensor(batch_size, maxlen).fill_(0)
+            offset = 0
+            for xx in x:
+                b, l = xx.shape
+                batch[offset:offset+b, :l] = xx
+                offset += b
+            if use_cuda:
+                batch = batch.cuda()
+            return batch
+
+        for out in it_():
+            word_ids_, select_ids_, hf_tokens = pick(out, ['word_ids', 'select_ids', 'hf_tokens'])
+            hf_tokens = batchify(hf_tokens)
+            model_output = hf_model(hf_tokens, output_hidden_states=True)
+
+            new_out = collections.defaultdict(list)
+            for i_b, (word_ids, select_ids) in enumerate(zip(word_ids_, select_ids_)):
+                vecs = model_output['hidden_states'][-1][i_b:i_b+1]
+                vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
+                # TODO: This block is slow...
+                padding = torch.tensor([-1] * (hf_tokens.shape[1] - word_ids.shape[1]), dtype=torch.long).view(1, -1)
+                word_ids = torch.cat([word_ids, padding], 1)
+                word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
+                select_mask = word_ids == select_ids
+                vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
+                # TODO: Only sum where needed.
+                keys = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
+
+                new_out['keys'].append(keys.cpu())
+                new_out['batch_u'] += out['batch_u'][i_b]
+                new_out['batch_u_offset'] += out['batch_u_offset'][i_b]
+
+            keys = torch.cat(new_out['keys'], 0)
+            yield new_out, keys
+
     if True:
         all_queries = torch.cat([x.cpu() for x in get_batched_queries(batch_size=32)], 0)
 
-        u_offset = 0
-        u_max = u[u_offset]
-        for start, end in get_batch_indices(batch_size=128, n=train_vals.shape[0], verbose=True):
-
-            batch_u, batch_u_offset = [], []
-            if start <= u_max:
-                while u_max < end:
-                    batch_u.append(u_max)
-                    batch_u_offset.append(u_offset)
-                    u_offset += 1
-                    u_max = u[u_offset]
-
-            # Skip batch if not relevant.
-            if len(batch_u) == 0:
-                continue
-
-            batch_u_index = np.array([idx - start for idx in batch_u])
-            assert batch_u_index.min() >= 0
-
-            # Keys
-            val_index = np.arange(start, end)
-            tokens, select_ids = build_query_window(val_index, train_vals, context_size=256) # context size measured by knn-lm tokenization.
-            select_ids = select_ids[batch_u_index]
-            select_ids = torch.from_numpy(select_ids).view(-1, 1)
-            word_ids, hf_tokens = hf_tokenize(tokens)
-
-            assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
-
-            keys = get_queries(hf_tokens, word_ids, select_ids)
-
+        for out, keys in get_batched_keys(batch_size=1):
+            batch_u, batch_u_offset = pick(out, ['batch_u', 'batch_u_offset'])
+            assert len(batch_u) == len(batch_u_offset)
             for i_u, u_ in enumerate(batch_u):
                 offset_ = batch_u_offset[i_u]
                 inv_mask = inv == offset_
                 inv_mask_flat = inv_mask.any(axis=1).reshape(inv_mask.shape[0])
-                key_ = keys[i_u].to(device)
-                queries_ = all_queries[inv_mask_flat].to(device)
+                key_ = keys[i_u]
+                continue
+                queries_ = all_queries[inv_mask_flat]
+                if use_cuda and False:
+                    key_ = key_.cuda()
+                    queries_ = queries_.cuda()
                 d_ = -1 * torch.sum((queries_ - key_.unsqueeze(0))**2, dim=-1)
                 output_dist[inv_mask] = d_.cpu().numpy()
                 output_done[inv_mask] = 1
+
         import ipdb; ipdb.set_trace()
         pass
 
