@@ -349,7 +349,6 @@ def main(args):
                 inv_mask = inv == offset_
                 inv_mask_flat = inv_mask.any(axis=1).reshape(inv_mask.shape[0])
                 key_ = keys[i_u]
-                continue
                 queries_ = all_queries[inv_mask_flat]
                 if use_cuda and False:
                     key_ = key_.cuda()

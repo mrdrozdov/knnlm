@@ -37,116 +37,154 @@ from tqdm import tqdm
 
 _my_globals = {}
 
+def pick(d, keys):
+    return [d[k] for k in keys]
+
+def npy_copy(x):
+    out = np.empty_like(x)
+    out[:] = x
+    return out
+
 
 class RunOriginal:
-    def run(self, dstore, vocab, mask=None, mask_b=None, tag=None):
-        if mask is None:
-            p = dstore.prob[:].copy()
-        else:
-            p = dstore.prob[:].copy()[mask]
+    def run(self, p):
         p_ = torch.from_numpy(p).float()
         ppl = EvalUtil.eval_ppl(p_)
         out = {}
         out['ppl'] = ppl
-        out['cfg'] = str(None)
-        out['desc'] = 'original[shape={}]'.format(p.shape[0])
         return out
 
 
 class RunKNNLM:
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.use_exact = False
-        self.flip_distance = True
-        self.sort = True
-        for k, v in cfg.items():
-            setattr(self, k, v)
-
-    def run(self, dstore, vocab, mask=None, mask_b=None, tag=None):
-        if mask is None:
-            p = dstore.prob[:].copy()
-            dist = dstore.dist[:].copy()
-            knn_tgts = dstore.knn_tgts[:].copy()
-            tgts = dstore.tgts[:].copy()
-        else:
-            p = dstore.prob[:].copy()[mask]
-            dist = dstore.dist[:].copy()[mask]
-            knn_tgts = dstore.knn_tgts[:].copy()[mask]
-            tgts = dstore.tgts[:].copy()[mask]
-
-        if self.use_exact:
-            dist = dstore.exact[:].copy()
-            if mask is not None:
-                dist = dist[mask]
-
-        if self.flip_distance:
-            dist = -dist
-
-        index = None
-        if self.sort:
-            assert len(dist.shape) == 3
-            index = np.argsort(dist, axis=1)[:, ::-1]
-            dist = np.take_along_axis(dist, index, axis=1)
-            knn_tgts = np.take_along_axis(knn_tgts, index, axis=1)
+    def run(self, p, tgts, dist, knn_tgts, coeff=0.25):
 
         p_ = torch.from_numpy(p).float()
         original_ppl = EvalUtil.eval_ppl(p_)
 
-        best_val = None
-        best_knn_p = None
-        best_cfg = None
-        limits_to_check = 8
-        limit_size = self.k // limits_to_check
-        limits_to_check_lst = [i * limit_size for i in range(1, limits_to_check)]
-        if not self.find_best_lim:
-            limits_to_check_lst = [self.k]
-        coeff_lst = np.arange(20) / 20
+        knn_p = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
+        knn_p_ = torch.from_numpy(knn_p).float()
+        new_p = EvalUtil.combine_knn_and_vocab_probs(knn_p_, p_, coeff)
+        new_ppl = EvalUtil.eval_ppl(new_p)
 
-
-        for lim in limits_to_check_lst:
-            dist_ = dist[:, :lim]
-            knn_tgts_ = knn_tgts[:, :lim]
-            knn_p = EvalUtil.get_knn_log_prob(tgts, dist_, knn_tgts_)
-            knn_p_ = torch.from_numpy(knn_p).float()
-            for coeff in coeff_lst[1:]:
-                new_p = EvalUtil.combine_knn_and_vocab_probs(
-                            knn_p_,
-                            p_,
-                            coeff)
-                ppl = EvalUtil.eval_ppl(new_p)
-                #print('lim={} coeff={} ppl={}'.format(lim, coeff, ppl))
-                if best_val is None or ppl < best_val:
-                    best_val = ppl
-                    best_knn_p = knn_p
-                    best_cfg = (lim, coeff)
         out = {}
-        out['tgts'] = tgts
-        out['knn_tgts'] = knn_tgts
-        out['dist'] = dist
-        out['knn_p'] = best_knn_p
-        out['p'] = p
-        out['ppl'] = best_val
-        out['index'] = index
-        out['cfg'] = str(tuple(best_cfg))
-        desc = self.cfg.copy()
-        desc['n'] = p.shape[0]
-        out['desc'] = 'knn-lm[{}]'.format(desc)
-        if tag is not None:
-            out['desc'] += '[{}]'.format(tag)
+        out['knn_p'] = knn_p
+        out['new_p'] = new_p
+        out['original_ppl'] = original_ppl
+        out['new_ppl'] = new_ppl
         return out
 
 
 
 
 def main(args):
+    use_cuda = torch.cuda.is_available()
+
+    torch.set_grad_enabled(False)
+
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
-    dstore.add_exact(args.lookup, args.lookup_k)
-    #dstore.add_annotations(args.dstore)
+    dstore.add_dist(args.custom_dist, args.custom_k, args.custom_size)
 
-    tgts = dstore.tgts[:]
-    knn_tgts = dstore.knn_tgts[:, :args.k]
+    cdist = npy_copy(dstore.custom_dist)
+    cdone = npy_copy(dstore.custom_done)
+    limit, k = cdist.shape[:2]
+    is_done = cdone.sum()
+    is_done_numel = cdone.shape[0] * cdone.shape[1]
+    done_row_mask = cdone.any(axis=1).flatten()
+    print('limit = {} ({}), k = {}, done = {}/{} ({:.3f})'.format(
+        limit, done_row_mask.sum(), k, is_done, is_done_numel, is_done/is_done_numel))
+
+    cdist = cdist[done_row_mask]
+    cdone = cdone[done_row_mask]
+
+    tgts = npy_copy(dstore.tgts[:limit][done_row_mask])
+    knn_tgts = npy_copy(dstore.knn_tgts[:limit, :k][done_row_mask])
+    knns = npy_copy(dstore.knns[:limit, :k][done_row_mask])
+    dist = npy_copy(dstore.dist[:limit, :k][done_row_mask])
+    prob = npy_copy(dstore.prob[:limit][done_row_mask])
+
+    # original
+    out = RunOriginal().run(prob)
+    print('# ORIGINAL')
+    print('original {:.3f}'.format(out['ppl']))
+    print('')
+
+    def sort_and_truncate(dist, new_k, extra):
+        index = np.argsort(dist, axis=1)[:, ::-1]
+        new_extra = {}
+        for k in list(extra.keys()):
+            v = extra[k]
+            new_v = np.take_along_axis(v, index, axis=1)
+            new_extra[k] = new_v[:, :new_k]
+
+        return new_extra
+
+    new_k = 8
+    for coeff in [0.1]:
+        extra = {}
+        extra['dist'] = dist
+        extra['knn_tgts'] = knn_tgts
+
+        print('@' * 20)
+        print('coeff = {}'.format(coeff))
+        # knn-lm
+        out = RunKNNLM().run(prob, tgts, dist, knn_tgts, coeff=coeff)
+        print('# KNN-LM')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+        # knn-lm (done)
+        dist_ = dist.copy()
+        dist_[cdone == 0] = -10000
+        out = RunKNNLM().run(prob, tgts, dist_, knn_tgts, coeff=coeff)
+        print('# KNN-LM (done)')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+        # knn-lm (done)
+        dist_ = cdist.copy()
+        dist_[cdone == 0] = -10000
+        out = RunKNNLM().run(prob, tgts, dist_, knn_tgts, coeff=coeff)
+        print('# KNN-LM (custom)')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+        # knn-lm (done)
+        dist_ = cdist.copy()
+        dist_ = -1 * dist_
+        dist_[cdone == 0] = -10000
+        out = RunKNNLM().run(prob, tgts, dist_, knn_tgts, coeff=coeff)
+        print('# KNN-LM (custom * -1)')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+        dist_ = cdist.copy()
+        dist_[cdone == 0] = -10000
+        dist_ = dist_[:, :new_k]
+        knn_tgts_ = knn_tgts[:, :new_k]
+        out = RunKNNLM().run(prob, tgts, dist_, knn_tgts_, coeff=coeff)
+        print('# KNN-LM (trunc)')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+        dist_ = cdist.copy()
+        dist_[cdone == 0] = -10000
+        new_extra = sort_and_truncate(dist_, new_k, extra)
+        dist_, knn_tgts_ = pick(new_extra, ['dist', 'knn_tgts'])
+        out = RunKNNLM().run(prob, tgts, dist_, knn_tgts_, coeff=coeff)
+        print('# KNN-LM (trunc and sort)')
+        print('original {:.3f}'.format(out['original_ppl']))
+        print('   knnlm {:.3f}'.format(out['new_ppl']))
+        print('')
+
+    sys.exit()
+
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
     print('read vocab')
@@ -248,11 +286,6 @@ def main(args):
 
         ######
 
-        def pick(d, keys, mask=None):
-            if mask is not None:
-                return [d[k][mask] for k in keys]
-            return [d[k] for k in keys]
-
         mask = mask.reshape(-1)
         tgts_ = tgts[mask]
         k = 128
@@ -318,23 +351,11 @@ class Dstore:
         self.dist = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
         # self.lookup_done = np.memmap(os.path.join(path, 'lookup_done.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
 
-    def add_exact(self, path, k):
-        self.exact = np.memmap(os.path.join(path, 'lookup_exact.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
-
-    def add_annotations(self, path):
-        self.src_pos = np.memmap(os.path.join(path, 'annotation_src_pos.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, 1))
-
-        # read pos dict
-        self.idx2tag = []
-        print('Reading POS Vocab...')
-        path_pos_dict = os.path.join(path, 'pos_dict.txt')
-        with open(path_pos_dict) as f:
-            for line in f:
-                print(line.strip())
-                idx, sym, _ = line.strip().split()
-                self.idx2tag.append(sym)
-        self.tag2idx = {v: k for k, v in enumerate(self.idx2tag)}
-        print('done\n')
+    def add_dist(self, path, k, size=None):
+        if size is None:
+            size = self.dstore_size
+        self.custom_dist = np.memmap('{}_dist.npy'.format(path), dtype=np.float32, mode='r', shape=(size, k, 1))
+        self.custom_done = np.memmap('{}_done.npy'.format(path), dtype=np.int, mode='r', shape=(size, k, 1))
 
 
 class Dictionary(object):
@@ -554,12 +575,15 @@ class EvalUtil:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # dstore
-    parser.add_argument('--dstore', default='from_dstore_valid/va', type=str)
-    parser.add_argument('--dstore-size', default=10000, type=int)
+    parser.add_argument('--dstore', default='dstore_valid', type=str)
+    parser.add_argument('--dstore-size', default=217646, type=int)
     parser.add_argument('--vocab', default='data-bin/wikitext-103/dict.txt')
     # dstore neighbors
-    parser.add_argument('--lookup', default='from_dstore_valid/lookup_va', type=str)
+    parser.add_argument('--lookup', default='dstore_valid/lookup', type=str)
     parser.add_argument('--lookup-k', default=1024, type=int)
+    parser.add_argument('--custom-dist', default='./roberta', type=str)
+    parser.add_argument('--custom-k', default=16, type=int)
+    parser.add_argument('--custom-size', default=20000, type=int)
     # examine
     parser.add_argument('--k', default=1024, type=int)
     args = parser.parse_args()
