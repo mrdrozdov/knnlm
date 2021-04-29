@@ -350,6 +350,7 @@ def main(args):
                 # Keys
                 val_index = np.arange(start, end)
                 tokens, select_ids = build_query_window(val_index, train_vals, context_size=256) # context size measured by knn-lm tokenization.
+                select_ids = torch.from_numpy(select_ids).view(-1, 1)
                 word_ids, hf_tokens = hf_tokenize(tokens)
 
                 assert hf_tokens.shape[1] < hf_tokenizer.model_max_length
@@ -384,30 +385,58 @@ def main(args):
             hf_tokens = batchify(hf_tokens)
             model_output = hf_model(hf_tokens, output_hidden_states=True)
 
+
             new_out = collections.defaultdict(list)
+            # SUPER NEW
+            batch_index = []
+            vec_index = []
             for i_b, (word_ids, select_ids) in enumerate(zip(word_ids_, select_ids_)):
-                vecs = model_output['hidden_states'][-1][i_b:i_b+1]
-                vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
-                # TODO: This block is slow...
-                padding = torch.tensor([-1] * (hf_tokens.shape[1] - word_ids.shape[1]), dtype=torch.long).view(1, -1)
-                word_ids = torch.cat([word_ids, padding], 1)
-                word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
-                select_mask = word_ids == select_ids
-                vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
-                # TODO: Only sum where needed.
-                keys = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
+                n = select_ids.shape[0]
+                for i_s in range(n):
+                    batch_index.append(i_b)
+                    vec_index.append(i_s)
 
-                new_out['keys'].append(keys.cpu())
-                new_out['batch_index'] += out['batch_index'][i_b]
+            keys = model_output['hidden_states'][-1]
+            new_out['keys'] = keys.cpu()
 
-            keys = torch.cat(new_out['keys'], 0)
+
+            if False:
+                for i_b, (word_ids, select_ids) in enumerate(zip(word_ids_, select_ids_)):
+                    # word_ids : B x N
+                    # select_ids : B x 1
+                    # TODO: This can be done fast with cumsum... Even across batch...
+                    # NEW
+                    vecs = model_output['hidden_states'][-1][i_b:i_b+1].squeeze(0)
+                    n = select_ids.shape[0]
+                    keys = vecs[:n]
+                    new_out['keys'].append(keys.cpu())
+                    new_out['batch_index'] += out['batch_index'][i_b]
+                    continue
+
+                    # OLD
+                    vecs = model_output['hidden_states'][-1][i_b:i_b+1]
+                    vecs = vecs.expand(select_ids.shape[0], vecs.shape[1], vecs.shape[2]).clone()
+                    # TODO: This block is slow...
+                    padding = torch.tensor([-1] * (hf_tokens.shape[1] - word_ids.shape[1]), dtype=torch.long).view(1, -1)
+                    word_ids = torch.cat([word_ids, padding], 1)
+                    word_ids = word_ids.expand(select_ids.shape[0], word_ids.shape[1])
+                    select_mask = word_ids == select_ids
+                    vecs[select_mask[:, :, None].expand_as(vecs) == False] = 0
+                    # TODO: Only sum where needed.
+                    keys = vecs.sum(1) / select_mask.sum(1).view(-1, 1).to(vecs.device)
+
+                    new_out['keys'].append(keys.cpu())
+                    new_out['batch_index'] += out['batch_index'][i_b]
+
+                keys = torch.cat(new_out['keys'], 0)
             yield new_out, keys
 
     if True:
 
-        all_queries = torch.cat([x.cpu() for x in get_batched_queries(batch_size=32)], 0)
+        #all_queries = torch.cat([x.cpu() for x in get_batched_queries(batch_size=32)], 0)
 
-        for out, keys in get_batched_keys(batch_size=1):
+        for out, keys in get_batched_keys_full(batch_size=64):
+            print(keys.shape)
             for i_b, batch_index in enumerate(out['batch_index']):
                 # TODO: Update output key array.
                 continue
