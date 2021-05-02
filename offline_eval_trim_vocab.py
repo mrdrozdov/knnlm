@@ -136,6 +136,93 @@ class RunKNNLM:
         return out
 
 
+class DownsampleDemo:
+
+    def __init__(self, vocab):
+        self.vocab = vocab
+
+    @staticmethod
+    def downsample_by_freq(context, n=10000):
+        """
+        Downsample vocab by keeping the top-N per token by frequency.
+        """
+        pass
+
+    @staticmethod
+    def print_statistics(context):
+        vocab = context['vocab']
+        knns = context['knns']
+        knn_tgts = context['knn_tgts']
+        u, indices, inverse, knn_counts = context['u_knns']
+        u_tgts = knn_tgts.reshape(-1)[indices]
+        u_tgts_, knn_tgt_counts = context['u_knn_tgts']
+
+        #
+        vocab_size = len(vocab)
+
+        # Print number of hits per token.
+        data_size = knns.reshape(-1).shape[0]
+        print('HITS PER TOKEN')
+        for i in range(30):
+            idx = u_tgts_[i]
+            sym = vocab.symbols[idx]
+            count_ = knn_tgt_counts[idx]
+            print('{}. [{}] {}, {}/{} ({:.3f})'.format(
+                i, idx, sym, count_, data_size, count_ / data_size
+                ))
+        print('')
+
+        # Print number of unique entries per token.
+        data_size = indices.shape[0]
+        print('UNIQUE ENTRIES PER TOKEN')
+        for i in tqdm(range(30), desc='unique-entries'):
+            idx = u_tgts_[i]
+            sym = vocab.symbols[idx]
+            count_ = (u_tgts == idx).sum()
+            print('{}. [{}] {}, {}/{} ({:.3f})'.format(
+                i, idx, sym, count_, data_size, count_ / data_size
+                ))
+        print('')
+
+    def run(self, knns, knn_tgts):
+        vocab = self.vocab
+        vocab_size = len(vocab)
+        data_size = knns.reshape(-1).shape[0]
+
+        u, indices, inverse, knn_counts = np.unique(knns,
+            return_index=True,
+            return_inverse=True,
+            return_counts=True
+            )
+
+        assert u.shape == indices.shape
+        assert u.shape == knn_counts.shape
+        assert inverse.shape[0] == data_size
+
+        u_tgts = knn_tgts.reshape(-1)[indices]
+
+        u_tgts_, knn_tgt_counts = np.unique(knn_tgts, return_counts=True)
+
+        context = {}
+        context['vocab'] = vocab
+        context['knns'] = knns
+        context['knn_tgts'] = knn_tgts
+        #
+        context['u_knns'] = (u, indices, inverse, knn_counts)
+        context['u_knn_tgts'] = (u_tgts_, knn_tgt_counts)
+
+        #
+        DownsampleDemo.print_statistics(context)
+
+        import ipdb; ipdb.set_trace()
+        pass
+
+
+
+def npy_copy(x):
+    out = np.empty_like(x)
+    out[:] = x
+    return out
 
 
 def main(args):
@@ -145,16 +232,44 @@ def main(args):
     dstore.add_exact(args.lookup, args.lookup_k)
     #dstore.add_annotations(args.dstore)
 
-    tgts = dstore.tgts[:]
-    knn_tgts = dstore.knn_tgts[:, :args.k]
+    tgts = npy_copy(dstore.tgts[:])
+    knn_tgts = npy_copy(dstore.knn_tgts[:, :args.k])
+    knns = npy_copy(dstore.knns[:, :args.k])
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
+    #
+    p = dstore.prob[:].copy()
+    dist = -dstore.exact[:].copy()
+    knn_p = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
+    flat_knn_logp, flat_knn_p = EvalUtil.get_knn_probmass(tgts, dist, knn_tgts)
+
+    coeff = 0.25
+    p_ = torch.from_numpy(p).float()
+    knn_p_ = torch.from_numpy(knn_p).float()
+    new_p = EvalUtil.combine_knn_and_vocab_probs(
+                knn_p_,
+                p_,
+                coeff)
+    ppl = EvalUtil.eval_ppl(p)
+    new_ppl = EvalUtil.eval_ppl(new_p)
+
+    print('ppl = {:.3f}, knn_ppl = {:.3f}'.format(ppl, new_ppl))
+
+    #accum = np.zeros((vocab_size, 1), dtype=np.float32)
+
+    #
     print('read vocab')
     vocab = Dictionary()
     vocab.add_from_file(args.vocab)
     vocab.finalize()
     print('found {} tokens'.format(len(vocab)))
     print('')
+
+    # Demo.
+    DownsampleDemo(vocab).run(knns, knn_tgts)
+
+    import ipdb; ipdb.set_trace()
+    pass
 
     def print_results(out, baseline):
         if isinstance(out, (list, tuple)):
@@ -516,6 +631,14 @@ class Dictionary(object):
 
 
 class EvalUtil:
+    @staticmethod
+    def get_knn_probmass(tgts, dists, knn_tgts):
+        tgts = torch.from_numpy(tgts).long().view(-1)
+        dists = torch.from_numpy(dists).float().squeeze(-1)
+        probs = torch.log_softmax(dists, dim=-1)
+        mass = torch.exp(probs)
+        return probs, mass
+
     @staticmethod
     def get_knn_log_prob(tgts, dists, knn_tgts):
 
