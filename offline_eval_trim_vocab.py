@@ -153,36 +153,93 @@ class DownsampleDemo:
         vocab = context['vocab']
         knns = context['knns']
         knn_tgts = context['knn_tgts']
-        u, indices, inverse, knn_counts = context['u_knns']
+        u_knns, indices, inverse, knn_counts = context['u_knns']
         u_tgts = knn_tgts.reshape(-1)[indices]
         u_tgts_, knn_tgt_counts = context['u_knn_tgts']
 
+        use_cuda = True
+        device = torch.cuda.current_device() if use_cuda else None
+
         #
         vocab_size = len(vocab)
+        data_size = knns.reshape(-1).shape[0]
+        num_entries = knns.shape[0]
+        num_unique_knns = u_tgts.shape[0]
+        num_unique_tgts = u_tgts_.shape[0]
 
         # Print number of hits per token.
-        data_size = knns.reshape(-1).shape[0]
-        print('HITS PER TOKEN')
-        for i in range(30):
-            idx = u_tgts_[i]
-            sym = vocab.symbols[idx]
-            count_ = knn_tgt_counts[idx]
-            print('{}. [{}] {}, {}/{} ({:.3f})'.format(
-                i, idx, sym, count_, data_size, count_ / data_size
-                ))
-        print('')
+        if False:
+            total = data_size
+            with open('out/num_hits_per_token.out', 'w') as f:
+                for i in tqdm(range(num_unique_tgts), desc='hits'):
+                    idx = u_tgts_[i]
+                    sym = vocab.symbols[idx]
+                    count_ = knn_tgt_counts[i]
+                    line = '{} idx={} {} {}/{} {:.3f}'.format(
+                        i, idx, sym, count_, total, count_ / total)
+                    f.write(line + '\n')
 
         # Print number of unique entries per token.
-        data_size = indices.shape[0]
-        print('UNIQUE ENTRIES PER TOKEN')
-        for i in tqdm(range(30), desc='unique-entries'):
-            idx = u_tgts_[i]
-            sym = vocab.symbols[idx]
-            count_ = (u_tgts == idx).sum()
-            print('{}. [{}] {}, {}/{} ({:.3f})'.format(
-                i, idx, sym, count_, data_size, count_ / data_size
-                ))
-        print('')
+        if False:
+            _ = """
+            If a token has more than `threshold` unique keys, then attempt to filter down.
+            """
+            threshold = 1000
+            total = num_unique_knns
+            batch_size = 16
+            pt_u_tgts = torch.from_numpy(u_tgts).to(device)
+            with open('out/num_unique_keys_per_token.out', 'w') as f:
+                for start in tqdm(range(0, num_unique_tgts, batch_size), desc='unique-entries'):
+                    batch_i = np.arange(start, min(start + batch_size, num_unique_tgts))
+                    batch_tgts = u_tgts_[batch_i]
+                    batch_tgts = torch.from_numpy(batch_tgts).to(device)
+                    mask = batch_tgts.view(-1, 1) == pt_u_tgts.view(1, -1)
+                    batch_count_ = mask.sum(-1) # num unique keys per token.
+                    #batch_count_ = np.sum(batch_idx.reshape(-1, 1) == u_tgts.reshape(1, -1), axis=-1)
+                    #import ipdb; ipdb.set_trace()
+
+                    for i_b, (i, idx) in enumerate(zip(batch_i, batch_tgts)):
+                        sym = vocab.symbols[idx]
+                        count_ = batch_count_[i_b]
+                        line = '{} {} {}'.format(idx, sym, count_)
+                        f.write(line + '\n')
+
+                    del mask
+
+        # Choose the keys to discard.
+        _ = """
+        If a token has more than `threshold` unique keys, then attempt to filter down.
+        """
+        vocab_threshold = 1000
+        top_N = 5000
+        total = num_unique_knns
+        #batch_size = 16
+        #pt_u_tgts = torch.from_numpy(u_tgts).to(device)
+        #pt_u_knns = torch.from_numpy(u_knns).to(device)
+        #pt_u_knn_counts = torch.from_numpy(knn_counts).to(device)
+
+        for i in range(0, vocab_threshold):
+            tgt = u_tgts_[i]
+            mask_is_tgt = u_tgts == tgt
+
+            # Anything not relevant give low value.
+            local_knn_counts = knn_counts.copy()
+            local_knn_counts[mask_is_tgt == False] = 0
+
+            # Sort by value and slice to top.
+            index = np.argsort(local_knn_counts)[::-1][:top_N]
+
+            # Mask for top-N.
+            mask_is_top = np.full_like(mask_is_tgt, False)
+            mask_is_top[index] = True
+
+            # Everything marked as true should be kept.
+            # TODO
+            mask_keep = np.logical_and(mask_is_tgt, mask_is_top)
+            mask_discard = np.logical_and(mask_is_tgt, mask_is_top == False)
+
+            assert mask_keep.sum() == top_N
+
 
     def run(self, knns, knn_tgts):
         vocab = self.vocab
@@ -232,14 +289,25 @@ def main(args):
     dstore.add_exact(args.lookup, args.lookup_k)
     #dstore.add_annotations(args.dstore)
 
+    p = dstore.prob[:].copy()
+    dist = -dstore.exact[:].copy()
     tgts = npy_copy(dstore.tgts[:])
     knn_tgts = npy_copy(dstore.knn_tgts[:, :args.k])
     knns = npy_copy(dstore.knns[:, :args.k])
+
+    #
+    limit = args.limit
+    if limit > 0:
+        p = p[:limit]
+        dist = dist[:limit]
+        tgts = tgts[:limit]
+        knn_tgts = knn_tgts[:limit]
+        knns = knns[:limit]
+
+    #
     label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
     #
-    p = dstore.prob[:].copy()
-    dist = -dstore.exact[:].copy()
     knn_p = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
     flat_knn_logp, flat_knn_p = EvalUtil.get_knn_probmass(tgts, dist, knn_tgts)
 
@@ -685,6 +753,8 @@ if __name__ == '__main__':
     parser.add_argument('--lookup-k', default=1024, type=int)
     # examine
     parser.add_argument('--k', default=1024, type=int)
+    # extra
+    parser.add_argument('--limit', default=-1, type=int)
     args = parser.parse_args()
 
     print(args)
