@@ -240,7 +240,7 @@ def main(args):
         mask_ppl = EvalUtil.eval_ppl(mask_p)
         print('ppl = {:.3f}, knn_ppl = {:.3f}, mask_ppl = {:.3f}'.format(ppl, new_ppl, mask_ppl))
 
-    keys = ['mask_test', 'mask_pos_pred', 'mask_neg_pred', 'mask_pos_gold', 'mask_neg_gold']
+    keys = ['mask_test', 'mask_pos_gold', 'mask_neg_gold']
 
     context_ = context
 
@@ -265,9 +265,58 @@ def main(args):
     context['tgts'] = tgts[mask]
     context['dist'] = dist[mask]
     context['p'] = p[mask]
+
+    # Overall with PRED and GOLD
+    header = 'OVERALL'
+    print(header)
+    print('-' * len(header))
+
     print('EVAL PRED')
     m = context_['mask_pos_pred'][mask]
     run_eval_mix(context, m, skip_pos=True)
+
+    print('EVAL GOLD')
+    m = context_['mask_pos_gold'][mask]
+    run_eval_mix(context, m, skip_pos=True)
+
+    # Subset with PRED and GOLD
+    header = 'SUBSET POS'
+    print(header)
+    print('-' * len(header))
+
+    mask = np.logical_and(context_['mask_test'], context_['mask_pos_gold'])
+    context = {}
+    context['knns'] = knns[mask]
+    context['knn_tgts'] = knn_tgts[mask]
+    context['tgts'] = tgts[mask]
+    context['dist'] = dist[mask]
+    context['p'] = p[mask]
+
+    print('EVAL PRED')
+    m = context_['mask_pos_pred'][mask]
+    run_eval_mix(context, m, skip_pos=True)
+
+    print('EVAL GOLD')
+    m = context_['mask_pos_gold'][mask]
+    run_eval_mix(context, m, skip_pos=True)
+
+    #
+    header = 'SUBSET NEG'
+    print(header)
+    print('-' * len(header))
+
+    mask = np.logical_and(context_['mask_test'], context_['mask_neg_gold'])
+    context = {}
+    context['knns'] = knns[mask]
+    context['knn_tgts'] = knn_tgts[mask]
+    context['tgts'] = tgts[mask]
+    context['dist'] = dist[mask]
+    context['p'] = p[mask]
+
+    print('EVAL PRED')
+    m = context_['mask_pos_pred'][mask]
+    run_eval_mix(context, m, skip_pos=True)
+
     print('EVAL GOLD')
     m = context_['mask_pos_gold'][mask]
     run_eval_mix(context, m, skip_pos=True)
