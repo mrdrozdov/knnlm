@@ -26,7 +26,7 @@ class FilterUtils:
             b_tgts = knn_tgts[i:min(i + batch_size, n)]
             m = np.isin(b, keep_ids)
             # Don't discard targets above the threshold.
-            m = np.logical_or(m, b_tgts >= args.vocab_threshold)
+            #m = np.logical_or(m, b_tgts >= args.vocab_threshold)
             mask[i:min(i + batch_size, n)] = m
         return mask
 

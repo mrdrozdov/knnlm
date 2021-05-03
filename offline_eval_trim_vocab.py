@@ -156,6 +156,15 @@ class DownsampleDemo:
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
 
+        for knn in u_knns.reshape(-1).tolist():
+            if knn in to_discard:
+                continue
+            to_keep.add(knn)
+
+        print('Filter Status')
+        print('keep: {}'.format(len(to_keep)))
+        print('discard: {}'.format(len(to_discard)))
+
         for knn in all_ids:
             if knn in to_discard or knn in to_keep:
                 continue
