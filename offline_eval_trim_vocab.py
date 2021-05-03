@@ -111,54 +111,71 @@ class DownsampleDemo:
             - List of positive knns (to keep).
             - And knns to discard.
         """
+        batch_size = 4
         vocab_threshold = 1000
         top_N = 5000
         all_ids = set([tgt for tgt in range(args.knn_dstore_size)])
         to_keep = set()
         to_discard = set()
+        #
+        pt_u_tgts = torch.from_numpy(u_tgts).to(device)
 
-        for i in tqdm(range(0, vocab_threshold), desc='filter'):
-            tgt = u_tgts_[i]
-            sym = vocab.symbols[tgt]
-            mask_is_tgt = u_tgts == tgt
+        def run_batch(i):
+            batch_i = np.arange(i, min(i + batch_size, vocab_threshold))
+            batch_tgt = torch.from_numpy(u_tgts_[batch_i]).to(device)
+            mask_is_tgt = batch_tgt.view(-1, 1) == pt_u_tgts.view(1, -1)
 
             # Anything not relevant give low value.
-            local_knn_counts = knn_counts.copy()
+            local_knn_counts = torch.from_numpy(knn_counts.copy()).to(device)
+            local_knn_counts = local_knn_counts.view(1, -1).repeat(batch_size, 1)
             local_knn_counts[mask_is_tgt == False] = 0
 
             # Sort by value and slice to top.
-            index = np.argsort(local_knn_counts)[::-1][:top_N]
+            index = torch.topk(local_knn_counts, k=top_N, dim=1, largest=True, sorted=True).indices
 
             # Mask for top-N.
-            mask_is_top = np.full_like(mask_is_tgt, False)
-            mask_is_top[index] = True
+            mask_is_top = torch.BoolTensor(*mask_is_tgt.shape).to(device).fill_(False)
+            mask_is_top.scatter_(index=index, dim=1, src=torch.ones(index.shape, dtype=torch.bool, device=device))
 
             # Everything marked as true should be kept.
-            # TODO
-            mask_keep = np.logical_and(mask_is_tgt, mask_is_top)
-            mask_discard = np.logical_and(mask_is_tgt, mask_is_top == False)
+            mask_keep = torch.logical_and(mask_is_tgt, mask_is_top)
+            mask_discard = torch.logical_and(mask_is_tgt, mask_is_top == False)
 
-            n_keep, n_discard = mask_keep.sum(), mask_discard.sum()
-            n_total = n_keep + n_discard
-            assert n_total == mask_is_tgt.sum()
+            for j, tgt in enumerate(batch_tgt.tolist()):
+                mask_keep_ = mask_keep[j].cpu().numpy()
+                mask_discard_ = mask_discard[j].cpu().numpy()
 
-            to_keep.update(u_knns[mask_keep].tolist())
-            to_discard.update(u_knns[mask_discard].tolist())
+                n_keep, n_discard = mask_keep_.sum(), mask_discard_.sum()
+                n_total = n_keep + n_discard
 
-            #print('{} {} {} {} {:.3f}'.format(tgt, sym, n_keep, n_total, n_keep/n_total))
+                to_keep.update(u_knns[mask_keep_].tolist())
+                to_discard.update(u_knns[mask_discard_].tolist())
+
+                sym = vocab.symbols[tgt]
+                #print('{} {} {} {} {:.3f}'.format(tgt, sym, n_keep, n_total, n_keep/n_total))
+        #
+        for i in tqdm(range(0, vocab_threshold, batch_size), desc='filter'):
+            run_batch(i)
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
 
         for knn in all_ids:
-            if knn in to_keep:
+            if knn in to_discard or knn in to_keep:
                 continue
-            to_discard.add(knn)
+            if args.keep_non_active:
+                to_keep.add(knn)
+            else:
+                to_discard.add(knn)
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
+
+        with open(os.path.join(args.output, 'info.json'), 'w') as f:
+            info = dict(keep=len(to_keep), discard=len(to_discard))
+            f.write(json.dumps(info))
 
         # Write key ids.
         print('Write ids.')
@@ -168,15 +185,16 @@ class DownsampleDemo:
         disc_ids[:, 0] = list(sorted(to_discard))
 
         # Write key vectors.
-        print('Write keys.')
-        batch_size = 1024
-        keys = knn_dstore.keys
-        new_keys = np.memmap(os.path.join(args.output, 'dstore_keys.npy'), dtype=np.float32, mode='w+', shape=(len(to_keep), 1024))
-        to_keep = list(sorted(to_keep))
-        for start in tqdm(range(0, len(to_keep), batch_size), desc='write-keys'):
-            end = min(start + batch_size, keys.shape[0])
-            to_read = to_keep[start:end]
-            new_keys[start:end] = keys[to_read]
+        if args.write_keys:
+            print('Write keys.')
+            batch_size = 1024
+            keys = knn_dstore.keys
+            new_keys = np.memmap(os.path.join(args.output, 'dstore_keys.npy'), dtype=np.float32, mode='w+', shape=(len(to_keep), 1024))
+            to_keep = list(sorted(to_keep))
+            for start in tqdm(range(0, len(to_keep), batch_size), desc='write-keys'):
+                end = min(start + batch_size, keys.shape[0])
+                to_read = to_keep[start:end]
+                new_keys[start:end] = keys[to_read]
 
 
     def run(self, context):
@@ -384,7 +402,9 @@ if __name__ == '__main__':
     # examine
     parser.add_argument('--k', default=1024, type=int)
     # output
+    parser.add_argument('--keep-non-active', action='store_true')
     parser.add_argument('--output', default='filtered_dstore_train', type=str)
+    parser.add_argument('--write-keys', action='store_true')
     # debug
     parser.add_argument('--limit', default=-1, type=int)
     args = parser.parse_args()
