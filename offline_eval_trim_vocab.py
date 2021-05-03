@@ -78,11 +78,6 @@ class DownsampleDemo:
 
         # Print number of unique entries per token.
         if False:
-            _ = """
-            If a token has more than `threshold` unique keys, then attempt to filter down.
-            """
-            threshold = 1000
-            total = num_unique_knns
             batch_size = 16
             pt_u_tgts = torch.from_numpy(u_tgts).to(device)
             with open('out/num_unique_keys_per_token.out', 'w') as f:

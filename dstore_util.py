@@ -8,7 +8,7 @@ class FilteredDstore:
         self.path = path
         self.vec_size = vec_size
 
-    def initialize(self):
+    def initialize(self, include_keys=True):
         path = self.path
 
         # Read metadata.
@@ -16,10 +16,12 @@ class FilteredDstore:
             metadata = json.loads(f.read())
 
         n_keep = metadata['keep']
+        n_disc = metadata['discard']
 
-        self.keys = np.memmap(os.path.join(path, 'dstore_keys.npy'), dtype=np.float32, mode='r', shape=(n_keep, self.vec_size))
+        if include_keys:
+            self.keys = np.memmap(os.path.join(path, 'dstore_keys.npy'), dtype=np.float32, mode='r', shape=(n_keep, self.vec_size))
         self.keep_ids = np.memmap(os.path.join(path, 'keep_ids.npy'), dtype=np.int, mode='r', shape=(n_keep, 1))
-        self.disc_ids = np.memmap(os.path.join(path, 'discard_ids.npy'), dtype=np.int, mode='r', shape=(n_keep, 1))
+        self.disc_ids = np.memmap(os.path.join(path, 'discard_ids.npy'), dtype=np.int, mode='r', shape=(n_disc, 1))
 
 
 

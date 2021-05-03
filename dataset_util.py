@@ -10,10 +10,10 @@ def npy_copy(x):
 
 
 class DatasetUtils:
-    def build_context(self, args):
+    def build_context(self, args, include_keys=True):
         if args.preset == 'test':
             dstore = Dstore(args.dstore, args.dstore_size, 1024)
-            dstore.initialize(include_keys=True)
+            dstore.initialize(include_keys=include_keys)
             dstore.add_neighbors(args.lookup, args.lookup_k)
             dstore.add_exact(args.lookup, args.lookup_k)
 
@@ -23,10 +23,11 @@ class DatasetUtils:
             train['tgts'] = npy_copy(dstore.tgts[:])
             train['knn_tgts'] = npy_copy(dstore.knn_tgts[:])
             train['knns'] = npy_copy(dstore.knns[:])
-            train['keys'] = npy_copy(dstore.keys[:])
+            if include_keys:
+                train['keys'] = npy_copy(dstore.keys[:])
 
             dstore = Dstore(args.test_dstore, args.test_dstore_size, 1024)
-            dstore.initialize(include_keys=True)
+            dstore.initialize(include_keys=include_keys)
             dstore.add_neighbors(args.test_lookup, args.lookup_k)
             dstore.add_exact(args.test_lookup, args.lookup_k)
 
@@ -36,11 +37,12 @@ class DatasetUtils:
             test['tgts'] = npy_copy(dstore.tgts[:])
             test['knn_tgts'] = npy_copy(dstore.knn_tgts[:])
             test['knns'] = npy_copy(dstore.knns[:])
-            test['keys'] = npy_copy(dstore.keys[:])
+            if include_keys:
+                test['keys'] = npy_copy(dstore.keys[:])
 
         elif args.preset == 'valid':
             dstore = Dstore(args.dstore, args.dstore_size, 1024)
-            dstore.initialize(include_keys=True)
+            dstore.initialize(include_keys=include_keys)
             dstore.add_neighbors(args.lookup, args.lookup_k)
             dstore.add_exact(args.lookup, args.lookup_k)
 
@@ -49,7 +51,8 @@ class DatasetUtils:
             tgts = npy_copy(dstore.tgts[:])
             knn_tgts = npy_copy(dstore.knn_tgts[:])
             knns = npy_copy(dstore.knns[:])
-            keys = npy_copy(dstore.keys[:])
+            if include_keys:
+                keys = npy_copy(dstore.keys[:])
 
             limit = args.limit
             if limit > 0:
@@ -58,7 +61,8 @@ class DatasetUtils:
                 tgts = tgts[:limit]
                 knn_tgts = knn_tgts[:limit]
                 knns = knns[:limit]
-                keys = keys[:limit]
+                if include_keys:
+                    keys = keys[:limit]
 
             train = {}
             train['p'] = p
@@ -66,13 +70,14 @@ class DatasetUtils:
             train['tgts'] = tgts
             train['knn_tgts'] = knn_tgts
             train['knns'] = knns
-            train['keys'] = keys
+            if include_keys:
+                train['keys'] = keys
 
             test = train
 
         elif args.preset == 'cross_valid':
             dstore = Dstore(args.dstore, args.dstore_size, 1024)
-            dstore.initialize(include_keys=True)
+            dstore.initialize(include_keys=include_keys)
             dstore.add_neighbors(args.lookup, args.lookup_k)
             dstore.add_exact(args.lookup, args.lookup_k)
 
@@ -81,7 +86,8 @@ class DatasetUtils:
             tgts = npy_copy(dstore.tgts[:])
             knn_tgts = npy_copy(dstore.knn_tgts[:])
             knns = npy_copy(dstore.knns[:])
-            keys = npy_copy(dstore.keys[:])
+            if include_keys:
+                keys = npy_copy(dstore.keys[:])
 
             limit = args.limit
             if limit > 0:
@@ -90,7 +96,8 @@ class DatasetUtils:
                 tgts = tgts[:limit]
                 knn_tgts = knn_tgts[:limit]
                 knns = knns[:limit]
-                keys = keys[:limit]
+                if include_keys:
+                    keys = keys[:limit]
 
             piv = int(0.5 * tgts.shape[0])
 
@@ -100,7 +107,8 @@ class DatasetUtils:
             train['tgts'] = tgts[:piv]
             train['knn_tgts'] = knn_tgts[:piv]
             train['knns'] = knns[:piv]
-            train['keys'] = keys[:piv]
+            if include_keys:
+                train['keys'] = keys[:piv]
 
             test = {}
             test['p'] = p[piv:]
@@ -108,7 +116,8 @@ class DatasetUtils:
             test['tgts'] = tgts[piv:]
             test['knn_tgts'] = knn_tgts[piv:]
             test['knns'] = knns[piv:]
-            test['keys'] = keys[piv:]
+            if include_keys:
+                test['keys'] = keys[piv:]
 
         context = {}
         context['train'] = train
