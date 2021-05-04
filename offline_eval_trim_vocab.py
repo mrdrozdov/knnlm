@@ -110,12 +110,16 @@ class DownsampleDemo:
         vocab_threshold = 1000
         top_N = 5000
         all_ids = set([tgt for tgt in range(args.knn_dstore_size)])
+        is_active = set()
         to_keep = set()
         to_discard = set()
         #
         pt_u_tgts = torch.from_numpy(u_tgts).to(device)
 
         def run_batch(i):
+            # TODO: This could be greatly sped up if you argsort u_knns first.
+
+            # Find KNNs that are also TGT.
             batch_i = np.arange(i, min(i + batch_size, vocab_threshold))
             batch_tgt = torch.from_numpy(u_tgts_[batch_i]).to(device)
             mask_is_tgt = batch_tgt.view(-1, 1) == pt_u_tgts.view(1, -1)
@@ -151,15 +155,19 @@ class DownsampleDemo:
         #
         for i in tqdm(range(0, vocab_threshold, batch_size), desc='filter'):
             run_batch(i)
+        is_active.update(u_knns.tolist())
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
 
-        for knn in u_knns.reshape(-1).tolist():
+        for knn, tgt in zip(u_knns.reshape(-1).tolist(), u_tgts.reshape(-1).tolist()):
             if knn in to_discard:
                 continue
-            to_keep.add(knn)
+            if tgt >= args.vocab_threshold:
+                to_keep.add(knn)
+            else:
+                to_discard.add(knn)
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
@@ -178,7 +186,7 @@ class DownsampleDemo:
         print('discard: {}'.format(len(to_discard)))
 
         with open(os.path.join(args.output, 'info.json'), 'w') as f:
-            info = dict(keep=len(to_keep), discard=len(to_discard))
+            info = dict(keep=len(to_keep), discard=len(to_discard), active=len(is_active))
             f.write(json.dumps(info))
 
         # Write key ids.
@@ -187,6 +195,8 @@ class DownsampleDemo:
         keep_ids[:, 0] = list(sorted(to_keep))
         disc_ids = np.memmap(os.path.join(args.output, 'discard_ids.npy'), dtype=np.int, mode='w+', shape=(len(to_discard), 1))
         disc_ids[:, 0] = list(sorted(to_discard))
+        actv_ids = np.memmap(os.path.join(args.output, 'active_ids.npy'), dtype=np.int, mode='w+', shape=(len(is_active), 1))
+        actv_ids[:, 0] = list(sorted(is_active))
 
         # Write key vectors.
         if args.write_keys:
