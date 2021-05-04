@@ -101,24 +101,23 @@ def main(args):
         for start in tqdm(range(0, N, batch_size), desc='exact'):
             end = min(start + batch_size, N)
 
+            # early exit
+            if u_offset >= u.shape[0]:
+                break
+
             # select u start
             u_start = u_offset
             if start > u[u_start]:
                 continue
             assert u[u_start] >= start
 
-            # early exit
-            u_left = u.shape[0] - u_offset
-            if u_left == 0:
-                break
-
             # select u end
             u_end = u_start
-            for i in range(u_left):
-                u_offset += 1
-                if u[u_offset] >= end:
+            for i in range(u_start, u.shape[0]):
+                if u[u_offset + i] >= end:
                     break
-                u_end = u_offset
+                u_end = u_offset + i
+            u_offset = u_end + 1
             assert u[u_end] < end
 
             # mask

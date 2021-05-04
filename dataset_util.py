@@ -48,6 +48,7 @@ class DatasetUtils:
 
             p = npy_copy(dstore.prob[:])
             dist = -npy_copy(dstore.exact[:])
+            approx_dist = npy_copy(dstore.dist[:])
             tgts = npy_copy(dstore.tgts[:])
             knn_tgts = npy_copy(dstore.knn_tgts[:])
             knns = npy_copy(dstore.knns[:])
@@ -58,6 +59,7 @@ class DatasetUtils:
             if limit > 0:
                 p = p[:limit]
                 dist = dist[:limit]
+                approx_dist = approx_dist[:limit]
                 tgts = tgts[:limit]
                 knn_tgts = knn_tgts[:limit]
                 knns = knns[:limit]
@@ -67,6 +69,7 @@ class DatasetUtils:
             train = {}
             train['p'] = p
             train['dist'] = dist
+            train['approx_dist'] = approx_dist
             train['tgts'] = tgts
             train['knn_tgts'] = knn_tgts
             train['knns'] = knns
