@@ -39,9 +39,11 @@ def main(args):
         print('get vals')
         #u, inverse = np.unique(knns, return_inverse=True)
         pt_knns = torch.from_numpy(knns).to(device)
-        u, inverse = torch.unique(pt_knns, return_inverse=True, sorted=True)
-        u = u.cpu().numpy()
-        inverse = inverse.cpu().numpy().reshape(-1)
+        pt_u, pt_inverse = torch.unique(pt_knns, return_inverse=True, sorted=True)
+        u = pt_u.cpu().numpy()
+        inverse = pt_inverse.cpu().numpy().reshape(-1)
+
+        del pt_knns, pt_u, pt_inverse
 
     else:
         print('load index')
@@ -64,16 +66,16 @@ def main(args):
         tmp = np.memmap(os.path.join(args.output, 'lookup_knn_tgts.npy'), dtype=np.int, mode='w+', shape=(n, k))
         tmp[:] = knn_tgts
         tmp = np.memmap(os.path.join(args.output, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(n, k))
-        tmp[:] = dist
+        tmp[:] = -dist
 
     if args.exact:
 
         def dist_func(a, b):
-            #a = torch.from_numpy(a).to(device)
-            #b = torch.from_numpy(b).to(device)
-            #d = torch.sum((a - b)**2, axis=-1)
-            #return d.cpu().numpy()
-            return np.sum((a - b)**2, axis=-1)
+            a = torch.from_numpy(a).to(device)
+            b = torch.from_numpy(b).to(device)
+            d = torch.sum((a - b)**2, axis=-1)
+            return d.cpu().numpy()
+            #return np.sum((a - b)**2, axis=-1)
 
         def fancy_lookup(keys, u):
             start, end = u.min(), u.max() + 1
@@ -81,7 +83,7 @@ def main(args):
             if end - start > 10**6:
                 raise Exception('This is too chunky.')
 
-            chunk = npy_copy(keys[start:end])
+            chunk = keys[start:end][:]
             return chunk[u - start]
 
         print('computing exact distance for {} queries and {} keys.'.format(q.shape[0], u.shape[0]))
@@ -92,21 +94,47 @@ def main(args):
 
         query_ids = np.arange(n).repeat(k)
 
-        for start in tqdm(range(0, u.shape[0], batch_size), desc='exact'):
-            end = min(start + batch_size, u.shape[0])
+        #for start in tqdm(range(0, u.shape[0], batch_size), desc='exact'):
+        N = knn_dstore.keys.shape[0]
+        u_range = np.arange(u.shape[0])
+        u_offset = 0
+        for start in tqdm(range(0, N, batch_size), desc='exact'):
+            end = min(start + batch_size, N)
+
+            # select u start
+            u_start = u_offset
+            if start > u[u_start]:
+                continue
+            assert u[u_start] >= start
+
+            # early exit
+            u_left = u.shape[0] - u_offset
+            if u_left == 0:
+                break
+
+            # select u end
+            u_end = u_start
+            for i in range(u_left):
+                u_offset += 1
+                if u[u_offset] >= end:
+                    break
+                u_end = u_offset
+            assert u[u_end] < end
 
             # mask
-            batch_i = np.arange(start, end)
-            mask = np.isin(inverse, batch_i)
-            assert mask.any() == True
-            batch_inv = inverse[mask] - start
-            assert batch_inv.min() == 0, (batch_inv.shape, batch_inv.min())
-            assert batch_inv.max() == end - start - 1, (start, end, batch_inv.max())
+            mask = np.logical_and(inverse >= u_start, inverse <= u_end).reshape(-1)
+            batch_inv = inverse[mask] - u_start
+            assert batch_inv.min() == 0
+            assert batch_inv.max() == u_end - u_start, (u_end - u_start, batch_inv.max())
 
             # keys
-            batch_u = u[start:end]
+            batch_u = u[u_start:u_end+1]
             #batch_u_k = knn_dstore.keys[batch_u]
-            batch_u_k = fancy_lookup(knn_dstore.keys, batch_u)
+            #batch_u_k = fancy_lookup(knn_dstore.keys, batch_u)
+
+            # fancy
+            keys = knn_dstore.keys[start:end][:]
+            batch_u_k = keys[batch_u - start]
             batch_k = batch_u_k[batch_inv]
 
             # queries
