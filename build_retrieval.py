@@ -54,13 +54,36 @@ def main(args):
 
         tmp = np.memmap(os.path.join(args.output, 'lookup_exact.npy'), dtype=np.float32, mode='w+', shape=(n, k))
 
-        for start in tqdm(range(0, n, batch_size), desc='exact'):
-            end = min(start + batch_size, n)
-            q_ = q[start:end].reshape(-1, 1, 1024)
-            knns_ = knns[start:end].reshape(-1)
-            keys = knn_dstore.keys[knns_].reshape(-1, k, 1024)
-            d = dist_func(q_, keys)
-            tmp[start:end] = d.reshape(-1, k)
+        query_ids = np.arange(n).repeat(k)
+
+        for start in tqdm(range(0, u.shape[0], batch_size), desc='exact'):
+            end = min(start + batch_size, u.shape[0])
+
+            # mask
+            batch_i = np.arange(start, end)
+            mask = np.isin(inverse, batch_i)
+            assert mask.any() == True
+            batch_inv = inverse[mask] - start
+            assert batch_inv.min() == 0, (batch_inv.shape, batch_inv.min())
+            assert batch_inv.max() == end - start - 1, (start, end, batch_inv.max())
+
+            # keys
+            batch_u = u[start:end]
+            batch_u_k = knn_dstore.keys[batch_u]
+            batch_k = batch_u_k[batch_inv]
+
+            # queries
+            batch_query_ids = query_ids[mask]
+            batch_q = q[batch_query_ids]
+            assert batch_q.shape == batch_k.shape, (batch_q.shape, batch_k.shape)
+
+            # dist
+            d = dist_func(batch_q, batch_k)
+            assert d.shape == (batch_q.shape[0],), (d.shape, batch_q.shape)
+
+            # update
+            mask = mask.reshape(-1, k)
+            tmp[mask] = d
 
 
 
