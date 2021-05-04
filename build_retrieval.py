@@ -50,7 +50,17 @@ def main(args):
         def dist_func(a, b):
             return np.sum((a - b)**2, axis=-1)
 
-        batch_size = 32
+        def fancy_lookup(keys, u):
+            start, end = u.min(), u.max() + 1
+
+            if end - start > 10**6:
+                raise Exception('This is too chunky.')
+
+            chunk = keys[start:end]
+            return chunk[u - start]
+
+
+        batch_size = 512
 
         tmp = np.memmap(os.path.join(args.output, 'lookup_exact.npy'), dtype=np.float32, mode='w+', shape=(n, k))
 
@@ -69,7 +79,8 @@ def main(args):
 
             # keys
             batch_u = u[start:end]
-            batch_u_k = knn_dstore.keys[batch_u]
+            #batch_u_k = knn_dstore.keys[batch_u]
+            batch_u_k = fancy_lookup(knn_dstore.keys, batch_u)
             batch_k = batch_u_k[batch_inv]
 
             # queries
