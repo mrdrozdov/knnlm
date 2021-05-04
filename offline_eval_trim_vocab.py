@@ -50,11 +50,11 @@ class DownsampleDemo:
         tgts = context['tgts']
         knns = context['knns']
         knn_tgts = context['knn_tgts']
-        u_knns, indices, inverse, knn_counts = context['u_knns']
+        u_knns, indices, knn_counts = context['u_knns']
         u_tgts = knn_tgts.reshape(-1)[indices]
         u_tgts_, knn_tgt_counts = context['u_knn_tgts']
 
-        use_cuda = True
+        use_cuda = False
         device = torch.cuda.current_device() if use_cuda else None
 
         #
@@ -109,7 +109,8 @@ class DownsampleDemo:
         batch_size = 4
         vocab_threshold = 1000
         top_N = 5000
-        all_ids = set([tgt for tgt in range(args.knn_dstore_size)])
+        all_knns = np.arange(knn_dstore.tgts.shape[0])
+        all_tgts = npy_copy(knn_dstore.tgts[:]).reshape(-1)
         is_active = set()
         to_keep = set()
         to_discard = set()
@@ -117,71 +118,75 @@ class DownsampleDemo:
         pt_u_tgts = torch.from_numpy(u_tgts).to(device)
 
         def run_batch(i):
-            # TODO: This could be greatly sped up if you argsort u_knns first.
+            # TODO: This could be greatly sped up if you argsort u_knns first, according to u_tgts.
 
-            # Find KNNs that are also TGT.
-            batch_i = np.arange(i, min(i + batch_size, vocab_threshold))
-            batch_tgt = torch.from_numpy(u_tgts_[batch_i]).to(device)
-            mask_is_tgt = batch_tgt.view(-1, 1) == pt_u_tgts.view(1, -1)
+            # Get output vocab.
+            start = i
+            end = min(i + batch_size, vocab_threshold)
+            #
+            u_range = np.arange(0, u_tgts_.shape[0])
+            u_tgts_start = u_range[u_tgts_ >= start].min()
+            u_tgts_end = u_range[u_tgts_ < end].max() + 1
+            batch_tgts = u_tgts_[u_tgts_start:u_tgts_end]
+            del u_tgts_start, u_tgts_end
+            batch_size_ = batch_tgts.shape[0]
 
-            # Anything not relevant give low value.
-            local_knn_counts = torch.from_numpy(knn_counts.copy()).to(device)
-            local_knn_counts = local_knn_counts.view(1, -1).repeat(batch_size, 1)
-            local_knn_counts[mask_is_tgt == False] = 0
+            if batch_size_ == 0:
+                return
+
+            # This works because u_tgts (which are tgts associated with u_knns) is sorted by tgt.
+            u_range = np.arange(0, u_tgts.shape[0])
+            u_tgts_start = u_range[u_tgts >= batch_tgts[0].item()].min()
+            u_tgts_end = u_range[u_tgts <= batch_tgts[-1].item()].max() + 1
+            batch_knns = u_knns[u_tgts_start:u_tgts_end]
+            batch_knn_tgts = u_tgts[u_tgts_start:u_tgts_end]
+            batch_knn_counts = knn_counts[u_tgts_start:u_tgts_end].copy()
+
+            assert batch_knns.shape == batch_knn_tgts.shape
+            assert batch_knns.shape == batch_knn_counts.shape
+
+            # Get mask.
+            mask_is_tgt = batch_tgts.reshape(-1, 1) == batch_knn_tgts.reshape(1, -1)
 
             # Sort by value and slice to top.
-            index = torch.topk(local_knn_counts, k=top_N, dim=1, largest=True, sorted=True).indices
+            pt_mask_is_tgt = torch.from_numpy(mask_is_tgt).to(device)
+            batch_knn_counts_repeat = torch.from_numpy(batch_knn_counts).to(device)
+            batch_knn_counts_repeat = batch_knn_counts_repeat.view(1, -1).repeat(batch_size_, 1)
+            batch_knn_counts_repeat[pt_mask_is_tgt == False] = 0
+            index = torch.topk(batch_knn_counts_repeat, k=top_N, dim=1, largest=True, sorted=True).indices
 
             # Mask for top-N.
             mask_is_top = torch.BoolTensor(*mask_is_tgt.shape).to(device).fill_(False)
             mask_is_top.scatter_(index=index, dim=1, src=torch.ones(index.shape, dtype=torch.bool, device=device))
+            mask_is_top = mask_is_top.cpu().numpy()
 
             # Everything marked as true should be kept.
-            mask_keep = torch.logical_and(mask_is_tgt, mask_is_top)
-            mask_discard = torch.logical_and(mask_is_tgt, mask_is_top == False)
+            mask_keep = np.logical_and(mask_is_tgt, mask_is_top)
+            mask_discard = np.logical_and(mask_is_tgt, mask_is_top == False)
 
-            for j, tgt in enumerate(batch_tgt.tolist()):
-                mask_keep_ = mask_keep[j].cpu().numpy()
-                mask_discard_ = mask_discard[j].cpu().numpy()
+            batch_knns_repeat = torch.from_numpy(batch_knns).view(1, -1).repeat(batch_size_, 1).numpy()
 
-                n_keep, n_discard = mask_keep_.sum(), mask_discard_.sum()
-                n_total = n_keep + n_discard
+            to_keep.update(batch_knns_repeat[mask_keep].reshape(-1).tolist())
+            to_discard.update(batch_knns_repeat[mask_discard].reshape(-1).tolist())
+            is_active.update(batch_knns.reshape(-1).tolist())
 
-                to_keep.update(u_knns[mask_keep_].tolist())
-                to_discard.update(u_knns[mask_discard_].tolist())
-
-                sym = vocab.symbols[tgt]
-                #print('{} {} {} {} {:.3f}'.format(tgt, sym, n_keep, n_total, n_keep/n_total))
         #
         for i in tqdm(range(0, vocab_threshold, batch_size), desc='filter'):
             run_batch(i)
-        is_active.update(u_knns.tolist())
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
 
-        for knn, tgt in zip(u_knns.reshape(-1).tolist(), u_tgts.reshape(-1).tolist()):
-            if knn in to_discard:
-                continue
-            if tgt >= args.vocab_threshold:
-                to_keep.add(knn)
-            else:
-                to_discard.add(knn)
-
-        print('Filter Status')
-        print('keep: {}'.format(len(to_keep)))
-        print('discard: {}'.format(len(to_discard)))
-
-        for knn in all_ids:
+        for knn, tgt in zip(all_knns.tolist(), all_tgts.tolist()):
             if knn in to_discard or knn in to_keep:
                 continue
-            if args.keep_non_active:
+            if tgt >= vocab_threshold:
                 to_keep.add(knn)
             else:
                 to_discard.add(knn)
 
-        print('Filter Status')
+        print('Filter Status (+all)')
         print('keep: {}'.format(len(to_keep)))
         print('discard: {}'.format(len(to_discard)))
 
@@ -219,26 +224,27 @@ class DownsampleDemo:
         vocab_size = len(vocab)
         data_size = knns.reshape(-1).shape[0]
 
-        u, indices, inverse, knn_counts = np.unique(knns,
+        u, indices, knn_counts = np.unique(knns,
             return_index=True,
-            return_inverse=True,
             return_counts=True
             )
 
         assert u.shape == indices.shape
         assert u.shape == knn_counts.shape
-        assert inverse.shape[0] == data_size
 
+        # Sort according to tgts.
         u_tgts = knn_tgts.reshape(-1)[indices]
+        sort_index = np.argsort(u_tgts)
+        u = u[sort_index]
+        indices = indices[sort_index]
+        knn_counts = knn_counts[sort_index]
 
+        # Unique tgts.
         u_tgts_, knn_tgt_counts = np.unique(knn_tgts, return_counts=True)
 
-        #
-        context['u_knns'] = (u, indices, inverse, knn_counts)
+        # Run.
+        context['u_knns'] = (u, indices, knn_counts)
         context['u_knn_tgts'] = (u_tgts_, knn_tgt_counts)
-        #
-
-        #
         DownsampleDemo.print_statistics(context)
 
         print('done')
@@ -416,7 +422,6 @@ if __name__ == '__main__':
     # examine
     parser.add_argument('--k', default=1024, type=int)
     # output
-    parser.add_argument('--keep-non-active', action='store_true')
     parser.add_argument('--output', default='filtered_dstore_train', type=str)
     parser.add_argument('--write-keys', action='store_true')
     # debug
