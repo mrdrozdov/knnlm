@@ -2,6 +2,7 @@ import json
 import os
 
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from knnlm import KNN_Index
@@ -19,35 +20,59 @@ def main(args):
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize(include_keys=True)
 
-    print('load index')
-    k = args.k
-    nprobe = 32
-    path = args.index
-    index = KNN_Index(path, nprobe, k)
-
     q = npy_copy(dstore.keys[:])
     if args.limit > 0:
         q = q[:args.limit]
-
-    print('query')
-    dist, knns = index.get_knns(q)
-
-    print('get vals')
-    u, inverse = np.unique(knns, return_inverse=True)
-    u_tgts = vals[u]
-    knn_tgts = u_tgts[inverse].reshape(-1, k)
-
-    print('writing...')
     n = q.shape[0]
-    tmp = np.memmap(os.path.join(args.output, 'lookup_knns.npy'), dtype=np.int, mode='w+', shape=(n, k))
-    tmp[:] = knns
-    tmp = np.memmap(os.path.join(args.output, 'lookup_knn_tgts.npy'), dtype=np.int, mode='w+', shape=(n, k))
-    tmp[:] = knn_tgts
-    tmp = np.memmap(os.path.join(args.output, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(n, k))
-    tmp[:] = dist
+
+    use_cuda = True
+    device = torch.cuda.current_device() if use_cuda else False
+
+    if args.skip_lookup:
+        print('restore')
+        k = args.k
+        knns = np.memmap(os.path.join(args.output, 'lookup_knns.npy'), dtype=np.int, mode='r', shape=(n, k))
+        knns = npy_copy(knns[:])
+        knn_tgts = np.memmap(os.path.join(args.output, 'lookup_knn_tgts.npy'), dtype=np.int, mode='r', shape=(n, k))
+        knn_tgts = npy_copy(knn_tgts[:])
+
+        print('get vals')
+        #u, inverse = np.unique(knns, return_inverse=True)
+        pt_knns = torch.from_numpy(knns).to(device)
+        u, inverse = torch.unique(pt_knns, return_inverse=True, sorted=True)
+        u = u.cpu().numpy()
+        inverse = inverse.cpu().numpy().reshape(-1)
+
+    else:
+        print('load index')
+        k = args.k
+        nprobe = 32
+        path = args.index
+        index = KNN_Index(path, nprobe, k)
+
+        print('query')
+        dist, knns = index.get_knns(q)
+
+        print('get vals')
+        u, inverse = np.unique(knns, return_inverse=True)
+        u_tgts = vals[u]
+        knn_tgts = u_tgts[inverse].reshape(-1, k)
+
+        print('writing...')
+        tmp = np.memmap(os.path.join(args.output, 'lookup_knns.npy'), dtype=np.int, mode='w+', shape=(n, k))
+        tmp[:] = knns
+        tmp = np.memmap(os.path.join(args.output, 'lookup_knn_tgts.npy'), dtype=np.int, mode='w+', shape=(n, k))
+        tmp[:] = knn_tgts
+        tmp = np.memmap(os.path.join(args.output, 'lookup_dist.npy'), dtype=np.float32, mode='w+', shape=(n, k))
+        tmp[:] = dist
 
     if args.exact:
+
         def dist_func(a, b):
+            #a = torch.from_numpy(a).to(device)
+            #b = torch.from_numpy(b).to(device)
+            #d = torch.sum((a - b)**2, axis=-1)
+            #return d.cpu().numpy()
             return np.sum((a - b)**2, axis=-1)
 
         def fancy_lookup(keys, u):
@@ -56,11 +81,12 @@ def main(args):
             if end - start > 10**6:
                 raise Exception('This is too chunky.')
 
-            chunk = keys[start:end]
+            chunk = npy_copy(keys[start:end])
             return chunk[u - start]
 
+        print('computing exact distance for {} queries and {} keys.'.format(q.shape[0], u.shape[0]))
 
-        batch_size = 512
+        batch_size = args.batch_size
 
         tmp = np.memmap(os.path.join(args.output, 'lookup_exact.npy'), dtype=np.float32, mode='w+', shape=(n, k))
 
@@ -116,6 +142,8 @@ if __name__ == '__main__':
     # output
     parser.add_argument('--output', default='filtered_dstore_train:keep_non_active=false/lookup')
     parser.add_argument('--exact', action='store_true')
+    parser.add_argument('--skip-lookup', action='store_true')
+    parser.add_argument('--batch-size', default=4096, type=int)
     args = parser.parse_args()
 
     # Print flags.
