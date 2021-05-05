@@ -15,6 +15,26 @@ import torch
 
 from tqdm import tqdm
 
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def print_color(x, c='HEADER'):
+    print(getattr(bcolors, c) + x + bcolors.ENDC)
+
+def print_color_mid(*args, **kwargs):
+    print(to_color_mid(*args, **kwargs))
+
+def to_color_mid(l, x, r, c='HEADER'):
+    return l + getattr(bcolors, c) + x + bcolors.ENDC + r
+
 
 class FilterUtils:
     @staticmethod
@@ -36,7 +56,13 @@ def main(args):
     device = torch.cuda.current_device() if use_cuda else None
     dkey = 'approx_dist' if args.approx else 'dist'
 
+    print('load eval')
     context = DatasetUtils().build_context(args, include_keys=False)
+
+    print('load train')
+    knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
+    knn_dstore.initialize(include_keys=False)
+    trn_tgts = npy_copy(knn_dstore.vals[:])
 
     p = context['test']['p']
     dist = context['test'][dkey]
@@ -74,50 +100,84 @@ def main(args):
         n = tgts.shape[0]
         avg_k = np.sum(knn_tgts >= 0, axis=1).mean()
 
-        import ipdb; ipdb.set_trace()
-
         print('n = {}, avg_k = {:.3f}, ppl = {:.3f}, knn_ppl = {:.3f}'.format(
             n, avg_k, ppl, new_ppl))
 
-    def print_header(header):
-        print(header)
-        print('-' * len(header))
+    def print_header(x, l=8, n=40):
+        line = '-' * l
+        line += ' ' + x + ' '
+        line += '-' * (n - len(line))
+        print(line)
+
+    print_header('eval ppl')
+    context = {}
+    context['knns'] = knns
+    context['knn_tgts'] = knn_tgts
+    context['tgts'] = tgts
+    context['dist'] = dist
+    context['p'] = p
+    run_eval(context)
+    print('\n\n')
 
     # COMPUTE ALL EVAL
-    print_header('EVAL ALL')
-    mask = np.full_like(tgts, True, dtype=np.bool).reshape(-1)
-    context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
-    run_eval(context)
-    print('')
+    logp = p
+    p = np.exp(logp)
+    knn_logp = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
+    knn_p = np.exp(knn_logp)
+    index = np.argsort(knn_p.reshape(-1) - p.reshape(-1))[::-1]
 
-    # COMPUTE FILTERED EVAL
+    def tostring(x):
+        if isinstance(x, np.ndarray):
+            x = x.tolist()
+        if not isinstance(x, (list, tuple)):
+            x = [x]
+        s = ' '.join([vocab.symbols[tok] for tok in x])
+        return s
 
-    print_header('EVAL <= T')
-    mask = (tgts <= args.vocab_threshold).reshape(-1)
-    context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
-    run_eval(context)
-    print('')
+    def pretty_eval_context(i, lsize=16, rsize=16):
+        l = tgts[i-lsize:i].reshape(-1)
+        x = tgts[i].reshape(-1)
+        r = tgts[i+1:i+1+rsize].reshape(-1)
+        return to_color_mid(tostring(l) + ' ', tostring(x), ' ' + tostring(r), c='BOLD')
 
-    print_header('EVAL > T')
-    mask = (tgts > args.vocab_threshold).reshape(-1)
-    context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
-    run_eval(context)
-    print('')
+    def pretty_key_context(i, lsize=16, rsize=16):
+        l = trn_tgts[i-lsize:i].reshape(-1)
+        x = trn_tgts[i].reshape(-1)
+        r = trn_tgts[i+1:i+1+rsize].reshape(-1)
+        return to_color_mid(tostring(l) + ' ', tostring(x), ' ' + tostring(r), c='BOLD')
+
+    for i in index.tolist():
+        tgt = tgts[i].item()
+        kp_ = max(knn_p[i].item(), 1e-4)
+        p_ = max(p[i].item(), 1e-4)
+        diff = kp_ - p_
+        k_ppl = 2**(-np.log(kp_) / np.log(2))
+        p_ppl = 2**(-np.log(p_) / np.log(2))
+
+        line ='{:>12} diff={:.3f} kp={:.3f}[{:.3f}] p={:.3f}[{:.3f}]'.format(
+            tgt, diff, kp_, k_ppl, p_, p_ppl
+            )
+
+        print(line)
+        print('-' * len(line))
+        # eval context
+        line = pretty_eval_context(i)
+        print(line)
+
+        # key context
+        k = 1024
+        for j in range(k):
+            knn = knns[i, j].item()
+            tgt_ = trn_tgts[knn].item()
+            if tgt != tgt_:
+                continue
+            line = pretty_key_context(knn)
+            line = '{:>4}. {:>012} : '.format(j, knn) + line
+            print(line)
+
+        print('')
+
+
 
 
 if __name__ == '__main__':
@@ -130,6 +190,9 @@ if __name__ == '__main__':
     parser.add_argument('--test-dstore', default='dstore_test', type=str)
     parser.add_argument('--test-dstore-size', default=245569, type=int)
     parser.add_argument('--test-lookup', default='dstore_test/lookup')
+    #
+    parser.add_argument('--knn-dstore', default='dstore_train', type=str)
+    parser.add_argument('--knn-dstore-size', default=103225485, type=int)
     # dstore neighbors
     parser.add_argument('--lookup', default='dstore_valid/lookup', type=str)
     parser.add_argument('--lookup-k', default=1024, type=int)

@@ -16,20 +16,6 @@ import torch
 from tqdm import tqdm
 
 
-class FilterUtils:
-    @staticmethod
-    def get_keep_mask(knns, knn_tgts, keep_ids, batch_size=1024):
-        mask = np.full_like(knns, False, dtype=np.bool)
-        n = knns.shape[0]
-        for i in tqdm(range(0, n, batch_size), desc='get-mask-keep'):
-            b = knns[i:min(i + batch_size, n)]
-            b_tgts = knn_tgts[i:min(i + batch_size, n)]
-            m = np.isin(b, keep_ids)
-            # Don't discard targets above the threshold.
-            #m = np.logical_or(m, b_tgts >= args.vocab_threshold)
-            mask[i:min(i + batch_size, n)] = m
-        return mask
-
 
 def main(args):
     use_cuda = True
@@ -41,6 +27,8 @@ def main(args):
     p = context['test']['p']
     dist = context['test'][dkey]
     tgts = context['test']['tgts']
+    src = tgts.copy()
+    src[1:] = tgts[:-1]
     knn_tgts = context['test']['knn_tgts']
     knns = context['test']['knns']
 
@@ -77,45 +65,96 @@ def main(args):
         print('n = {}, avg_k = {:.3f}, ppl = {:.3f}, knn_ppl = {:.3f}'.format(
             n, avg_k, ppl, new_ppl))
 
-    def print_header(header):
-        print(header)
-        print('-' * len(header))
+    def print_header(x, l=8, n=40):
+        line = '-' * l
+        line += ' ' + x + ' '
+        line += '-' * (n - len(line))
+        print(line)
 
     # COMPUTE ALL EVAL
     print_header('EVAL ALL')
-    mask = np.full_like(tgts, True, dtype=np.bool).reshape(-1)
     context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
+    context['knns'] = knns
+    context['knn_tgts'] = knn_tgts
+    context['tgts'] = tgts
+    context['dist'] = dist
+    context['p'] = p
     run_eval(context)
     print('')
 
     # COMPUTE FILTERED EVAL
 
-    print_header('EVAL <= T')
-    mask = (tgts <= args.vocab_threshold).reshape(-1)
-    context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
-    run_eval(context)
-    print('')
+    w_counts = np.array(vocab.count).reshape(-1)
+    src_counts = w_counts[src.reshape(-1)]
+    tgt_counts = w_counts[tgts.reshape(-1)]
 
-    print_header('EVAL > T')
-    mask = (tgts > args.vocab_threshold).reshape(-1)
-    context = {}
-    context['knns'] = knns[mask]
-    context['knn_tgts'] = knn_tgts[mask]
-    context['tgts'] = tgts[mask]
-    context['dist'] = dist[mask]
-    context['p'] = p[mask]
-    run_eval(context)
-    print('')
+    t_list = [10**i for i in range(1, 7)]
+
+    print('\n' + 't is src')
+
+    for i in range(0, len(t_list)):
+        t0 = t_list[i]
+        t1 = np.inf if (i+1) >= len(t_list) else t_list[i+1]
+
+        mask = np.logical_and(src_counts >= t0, src_counts < t1)
+
+        print_header('interval = {}:{}'.format(t0, t1))
+
+        context = {}
+        context['knns'] = knns[mask]
+        context['knn_tgts'] = knn_tgts[mask]
+        context['tgts'] = tgts[mask]
+        context['dist'] = dist[mask]
+        context['p'] = p[mask]
+        run_eval(context)
+
+        print('')
+
+    print('\n' + 't is tgt')
+
+    for i in range(0, len(t_list)):
+        t0 = t_list[i]
+        t1 = np.inf if (i+1) >= len(t_list) else t_list[i+1]
+
+        mask = np.logical_and(tgt_counts >= t0, tgt_counts < t1)
+
+        print_header('interval = {}:{}'.format(t0, t1))
+
+        context = {}
+        context['knns'] = knns[mask]
+        context['knn_tgts'] = knn_tgts[mask]
+        context['tgts'] = tgts[mask]
+        context['dist'] = dist[mask]
+        context['p'] = p[mask]
+        run_eval(context)
+
+        print('')
+
+    print('\n' + 'use both')
+
+    for i in range(0, len(t_list)):
+        for j in range(0, len(t_list)):
+            t0_src = t_list[i]
+            t1_src = np.inf if (i+1) >= len(t_list) else t_list[i+1]
+
+            t0_tgt = t_list[j]
+            t1_tgt = np.inf if (j+1) >= len(t_list) else t_list[j+1]
+
+            mask_src = np.logical_and(src_counts >= t0_src, src_counts < t1_src)
+            mask_tgt = np.logical_and(tgt_counts >= t0_tgt, tgt_counts < t1_tgt)
+            mask = np.logical_and(mask_src, mask_tgt)
+
+            print_header('interval = src:{}:{} tgt:{}:{}'.format(t0_src, t1_src, t0_tgt, t1_tgt))
+
+            context = {}
+            context['knns'] = knns[mask]
+            context['knn_tgts'] = knn_tgts[mask]
+            context['tgts'] = tgts[mask]
+            context['dist'] = dist[mask]
+            context['p'] = p[mask]
+            run_eval(context)
+
+            print('')
 
 
 if __name__ == '__main__':

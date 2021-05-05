@@ -133,7 +133,8 @@ def main(args):
         ppl = EvalUtil.eval_ppl(p)
         new_ppl = EvalUtil.eval_ppl(new_p)
         print('n = {}, avg_k = {:.3f}'.format(tgts.shape[0], np.sum(knn_tgts >= 0, axis=1).mean()))
-        print('ppl = {:.3f}, knn_ppl = {:.3f}'.format(ppl, new_ppl))
+        knn_better = (knn_p_ > p_).sum().item() / p_.shape[0]
+        print('ppl = {:.3f}, knn_ppl = {:.3f}, n[p_knn > p] = {:.3f}'.format(ppl, new_ppl, knn_better))
 
     def run_eval_mix(context, mask, skip_pos=False):
         knns = context['knns']
@@ -158,7 +159,21 @@ def main(args):
         mask_p = new_p.clone()
         mask_p[mask] = p_[mask]
         mask_ppl = EvalUtil.eval_ppl(mask_p)
-        print('ppl = {:.3f}, knn_ppl = {:.3f}, mask_ppl = {:.3f}'.format(ppl, new_ppl, mask_ppl))
+
+        knn_better = (knn_p_ > p_).sum().item() / p_.shape[0]
+        flat_ppl_p = 2**(-p_.clamp_min(1e-4) / np.log(2))
+        flat_ppl_knn = 2**(-knn_p_.clamp_min(1e-4) / np.log(2))
+        knn_better = (flat_ppl_knn - flat_ppl_p).mean()
+
+        print('ppl = {:.3f}, knn_ppl = {:.3f}, mask_ppl = {:.3f}, n[p_knn > p] = {:.3f}'.format(ppl, new_ppl, mask_ppl, knn_better))
+
+    def print_divider(text, prefix=8, size=40):
+        line = '=' * prefix
+        line += ' '
+        line += text
+        line += ' '
+        line += '=' * (size - len(line))
+        print(line)
 
     # Unpack test data.
     knns = context['test']['knns']
@@ -193,22 +208,18 @@ def main(args):
     context['p'] = p
 
     # Overall with PRED and GOLD
-    header = 'OVERALL'
-    print(header)
-    print('-' * len(header))
+    print_divider('OVERALL')
 
-    print('EVAL PRED')
+    print('[pred]')
     m = out['mask_pos_pred']
     run_eval_mix(context, m, skip_pos=True)
 
-    print('EVAL GOLD')
+    print('[gold]')
     m = out['mask_pos_gold']
     run_eval_mix(context, m, skip_pos=True)
 
     # Subset with PRED and GOLD
-    header = 'SUBSET POS'
-    print(header)
-    print('-' * len(header))
+    print_divider('SUBSET:NO_RANK')
 
     mask = out['mask_pos_gold']
     context = {}
@@ -218,18 +229,16 @@ def main(args):
     context['dist'] = dist[mask]
     context['p'] = p[mask]
 
-    print('EVAL PRED')
+    print('[pred]')
     m = out['mask_pos_pred'][mask]
     run_eval_mix(context, m, skip_pos=True)
 
-    print('EVAL GOLD')
+    print('[gold]')
     m = out['mask_pos_gold'][mask]
     run_eval_mix(context, m, skip_pos=True)
 
     #
-    header = 'SUBSET NEG'
-    print(header)
-    print('-' * len(header))
+    print_divider('SUBSET:RANK')
 
     mask = out['mask_neg_gold']
     context = {}
