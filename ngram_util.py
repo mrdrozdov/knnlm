@@ -15,12 +15,13 @@ class Model:
     def batch_predict(self, src, tgts):
         # TODO: Should we be able to use small max_ngram as desired?
         max_ngram = self.max_ngram
-        assert src.shape == tgts.shape
+        assert src.shape[0] == tgts.shape[0]
+        assert src.shape[1] == self.max_ngram - 1
         n = tgts.shape[0]
         p = np.zeros((n, 1), dtype=np.float32)
         for i in range(n):
             tgt = tgts[i].item()
-            context = tgts[i-max_ngram+1:i].flatten().tolist()
+            context = src[i].tolist()
             p[i] = self.predict(context, tgt)
         return p
 
@@ -64,27 +65,40 @@ def build_ngram_lm(trn_src, trn_tgt, limit=-1, max_ngram=3):
 
     for t in tqdm(range(100, n), desc='train'):
 
-        win = trn_tgt[t-max_ngram+1:t+1].flatten().tolist()
+        w_t = trn_tgt[t].item()
+        context = trn_src[t].tolist()
+        window = context + [w_t]
 
-        for size in range(1, max_ngram + 1):
-            if size == 1:
-                w_t = win[-1]
-                c[size][w_t] += 1
-            else:
-                gram = tuple(win[-size:])
-                c[size][gram] += 1
+        size = 1
+        c[size][w_t] += 1
+
+        for size in range(2, max_ngram + 1):
+            gram = tuple(window[-size:])
+            c[size][gram] += 1
 
     model = Model(c=c, max_ngram=max_ngram)
     return model
 
 
+def make_src(tgts, max_ngram=2):
+    assert max_ngram > 1
+
+    n = tgts.shape[0]
+    src = np.zeros((n, max_ngram-1), dtype=np.int)
+
+    size_prev = max_ngram - 1
+    for i in range(size_prev):
+        src[(i+1):, -(i+1)] = tgts[:-(i+1), 0]
+    return src
+
+
 if __name__ == '__main__':
 
-    trn_tgt = np.random.randint(0, 100, 10000)
-    trn_src = trn_tgt.copy()
-    trn_src[1:] = trn_tgt[:-1]
+    max_ngram = 3
+    trn_tgt = np.random.randint(0, 100, 10000).reshape(-1, 1)
+    trn_src = make_src(trn_tgt, max_ngram)
 
-    ngram_lm = build_ngram_lm(trn_src, trn_tgt, max_ngram=3)
+    ngram_lm = build_ngram_lm(trn_src, trn_tgt, max_ngram=max_ngram)
 
     probs = ngram_lm.batch_predict(trn_src, trn_tgt)
 

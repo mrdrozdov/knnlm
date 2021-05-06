@@ -27,17 +27,15 @@ def main(args):
     p = context['test']['p']
     dist = context['test'][dkey]
     tgts = context['test']['tgts']
-    src = tgts.copy()
-    src[1:] = tgts[:-1]
+    src = make_src(tgts, args.max_ngram)
     knn_tgts = context['test']['knn_tgts']
     knns = context['test']['knns']
 
     knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
     knn_dstore.initialize(include_keys=False)
 
-    trn_tgt = npy_copy(knn_dstore.tgts[:]).reshape(-1)
-    trn_src = trn_tgt.copy()
-    trn_src[1:] = trn_src[:-1]
+    trn_tgt = npy_copy(knn_dstore.tgts[:])
+    trn_src = make_src(trn_tgt, args.max_ngram)
     ngram_lm = build_ngram_lm(trn_src, trn_tgt, limit=args.ngram_limit, max_ngram=args.max_ngram)
 
     print('read vocab')
@@ -145,7 +143,7 @@ def main(args):
     # COMPUTE FILTERED EVAL
 
     w_counts = np.array(vocab.count).reshape(-1)
-    src_counts = w_counts[src.reshape(-1)]
+    src_counts = w_counts[src[:, -1].reshape(-1)]
     tgt_counts = w_counts[tgts.reshape(-1)]
 
     t_list = [10**i for i in range(1, 7)]
@@ -247,7 +245,7 @@ if __name__ == '__main__':
     # debug
     parser.add_argument('--limit', default=-1, type=int)
     parser.add_argument('--ngram-limit', default=-1, type=int, help='Number of training examples for ngram lm.')
-    parser.add_argument('--max-ngram', default=3, type=int, help='Token width of ngram lm.')
+    parser.add_argument('--max-ngram', default=2, type=int, help='Token width of ngram lm.')
     parser.add_argument('--preset', default='valid', type=str)
     parser.add_argument('--approx', action='store_true')
     args = parser.parse_args()
