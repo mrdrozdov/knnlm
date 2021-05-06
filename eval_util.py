@@ -40,6 +40,17 @@ class EvalUtil:
         return curr_prob
 
     @staticmethod
+    def combine_many_probs(p_list, vocab_p, coeff_list):
+        combine_probs = torch.stack([vocab_p] + p_list, dim=0)
+        coeffs = torch.ones_like(combine_probs)
+        coeffs[0] = np.log(1 - sum(coeff_list))
+        for i, c in enumerate(coeff_list):
+            coeffs[i+1] = np.log(c)
+        curr_prob = torch.logsumexp(combine_probs + coeffs, dim=0)
+
+        return curr_prob
+
+    @staticmethod
     def eval_ppl(p):
         avg_nll = -p.mean() / np.log(2)
         ppl = 2**avg_nll

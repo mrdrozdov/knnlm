@@ -101,6 +101,7 @@ def main(args):
 
         ngram_p = ngram_lm.batch_predict(src, tgts)
         ngram_logp = np.log(np.clip(ngram_p, 1e-8, 1))
+        ngram_logp[ngram_p == 0] = -10000
 
         coeff = 0.25
         p_ = torch.from_numpy(p).float()
@@ -117,14 +118,25 @@ def main(args):
                     p_,
                     coeff)
 
+        interp_many_p = EvalUtil.combine_many_probs(
+                [knn_p_, ngram_p_],
+                p_,
+                [0.1, 0.2]
+                )
+
         ppl = EvalUtil.eval_ppl(p)
-        knn_ppl = EvalUtil.eval_ppl(interp_knn_p)
-        ngram_ppl = EvalUtil.eval_ppl(interp_ngram_p)
+        #knn_ppl = EvalUtil.eval_ppl(knn_p_)
+        #ngram_ppl = EvalUtil.eval_ppl(ngram_p_)
+        knn_ppl = 0
+        ngram_ppl = 0
+        interp_knn_ppl = EvalUtil.eval_ppl(interp_knn_p)
+        interp_ngram_ppl = EvalUtil.eval_ppl(interp_ngram_p)
+        interp_many_ppl = EvalUtil.eval_ppl(interp_many_p)
 
         n = tgts.shape[0]
 
-        print('n = {}, ppl = {:.3f}, knn_ppl = {:.3f}, ngram_ppl = {:.3f}'.format(
-            n, ppl, knn_ppl, ngram_ppl))
+        print('n = {}, ppl = {:.3f}, knn_ppl = {:.3f}, ngram_ppl = {:.3f}, i_knn_ppl = {:.3f}, i_ngram_ppl = {:.3f}, i_many_ppl = {:.3f}'.format(
+            n, ppl, knn_ppl, ngram_ppl, interp_knn_ppl, interp_ngram_ppl, interp_many_ppl))
 
     def print_header(x, l=8, n=40):
         line = '-' * l
