@@ -48,6 +48,8 @@ class DownsampleDemo:
         knn_dstore = context['knn_dstore']
         vocab = context['vocab']
         tgts = context['tgts']
+        src = tgts.copy()
+        src[1:] = tgts[:-1]
         knns = context['knns']
         knn_tgts = context['knn_tgts']
         u_knns, indices, knn_counts = context['u_knns']
@@ -170,9 +172,98 @@ class DownsampleDemo:
             to_discard.update(batch_knns_repeat[mask_discard].reshape(-1).tolist())
             is_active.update(batch_knns.reshape(-1).tolist())
 
+        w_counts = np.array(vocab.count).reshape(-1)
+        src_counts = w_counts[src.reshape(-1)]
+        tgt_counts = w_counts[tgts.reshape(-1)]
+
+        batch_size = 128
+
+        def find_knn_freq(mask):
+            tgt_knn_counts = {}
+
+            b_knns = knns[mask]
+            b_knn_tgts = knn_tgts[mask]
+
+            u_knns, u_knn_indices, u_knn_counts = np.unique(b_knns, return_index=True, return_counts=True)
+            u_knns_TO_tgts = b_knn_tgts.reshape(-1)[u_knn_indices]
+            u_tgts, u_tgt_indices = np.unique(b_knn_tgts, return_index=True)
+            total = u_tgts.shape[0]
+
+            u_range = np.arange(0, total)
+
+            for start in tqdm(range(0, total, batch_size), desc='find', disable=False):
+                end = min(start + batch_size, total)
+
+                batch_tgts = u_tgts[start:end]
+                u_start = batch_tgts[0].item()
+                u_end = batch_tgts[-1].item()
+
+                mask_knns = np.logical_and(u_knns_TO_tgts >= u_start, u_knns_TO_tgts <= u_end)
+                if not mask_knns.any().item():
+                    continue
+
+                batch_knns_TO_tgts = u_knns_TO_tgts[mask_knns].tolist()
+                batch_knn_counts = u_knn_counts[mask_knns].tolist()
+                batch_knns = u_knns[mask_knns].tolist()
+
+                for t in batch_tgts.tolist():
+                    tgt_knn_counts[t] = collections.Counter()
+
+                batch_tgts_set = set(batch_tgts.tolist())
+
+                for t, k, c in zip(batch_knns_TO_tgts, batch_knns, batch_knn_counts):
+                    assert t in batch_tgts_set
+                    tgt_knn_counts[t][k] = c
+
+            res = {}
+            res['tgt_knn_counts'] = tgt_knn_counts
+            return res
+
+        fout = open('./tgt_knn_counts.out', 'w')
+
+        def run_section(t0_src, t1_src, t0_tgt, t1_tgt):
+            def print_header(x, l=8, n=40):
+                line = '-' * l + ' '
+                line += x + ' '
+                line += '-' * (n - len(line))
+                print(line)
+
+            print_header('src = {}:{}, tgt = {}:{}'.format(t0_src, t1_src, t0_tgt, t1_tgt))
+
+            mask_src = np.logical_and(src_counts >= t0_src, src_counts < t1_src)
+            mask_tgt = np.logical_and(tgt_counts >= t0_tgt, tgt_counts < t1_tgt)
+            mask = np.logical_and(mask_src, mask_tgt)
+
+            n = mask.sum()
+            print('n = {}'.format(n))
+
+            res = find_knn_freq(mask)
+            tgt_knn_counts = res['tgt_knn_counts']
+
+            # write
+            fout.write('{} {} {} {} {}\n'.format(t0_src, t1_src, t0_tgt, t1_tgt, n))
+            for tgt in tqdm(tgt_knn_counts.keys(), desc='write', disable=False):
+                for knn, count in tgt_knn_counts[tgt].items():
+                    fout.write('{} {} {}\n'.format(tgt, knn, count))
+            fout.write('\n')
+
+
+        t_list = [10, 100, 1000, 10000, 100000, 1000000]
+
+        for i in range(len(t_list)):
+            for j in range(len(t_list)):
+                t0_src = t_list[i]
+                t1_src = np.inf if (i+1) >= len(t_list) else t_list[i+1]
+                t0_tgt = t_list[j]
+                t1_tgt = np.inf if (j+1) >= len(t_list) else t_list[j+1]
+
+                run_section(t0_src, t1_src, t0_tgt, t1_tgt)
+
+        sys.exit()
+
         #
-        for i in tqdm(range(0, vocab_threshold, batch_size), desc='filter'):
-            run_batch(i)
+        #for i in tqdm(range(0, vocab_threshold, batch_size), desc='filter'):
+        #    run_batch(i)
 
         print('Filter Status')
         print('keep: {}'.format(len(to_keep)))
@@ -421,9 +512,6 @@ if __name__ == '__main__':
     parser.add_argument('--knn-dstore-size', default=103225485, type=int)
     # examine
     parser.add_argument('--k', default=1024, type=int)
-    # output
-    parser.add_argument('--output', default='filtered_dstore_train', type=str)
-    parser.add_argument('--write-keys', action='store_true')
     # debug
     parser.add_argument('--limit', default=-1, type=int)
     args = parser.parse_args()
@@ -431,10 +519,6 @@ if __name__ == '__main__':
     # Print flags.
     print(args)
 
-    # Write flags.
-    os.system('mkdir -p {}'.format(args.output))
-    with open(os.path.join(args.output, 'flags.json'), 'w') as f:
-        f.write(json.dumps(args.__dict__))
 
     main(args)
 
