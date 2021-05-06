@@ -55,6 +55,33 @@ def main(args):
         dist = context['dist']
         p = context['p']
 
+        def rerank():
+            ngram_dist = np.zeros(knns.shape, dtype=np.float32)
+
+            k = knn_tgts.shape[1]
+            for i_k in range(k):
+                tgts_ = knn_tgts[:, i_k]
+                ngram_dist[:, i_k] = ngram_lm.batch_predict(src, tgts_)
+
+            # Use a stable sort since there are many ties.
+            ngram_index = np.argsort(ngram_dist, axis=1, kind='mergesort')[:, ::-1]
+
+            def take_(x):
+                return np.take_along_axis(x, ngram_index, axis=1)
+
+            new_k = 512
+
+            res = {}
+            res['knns'] = take_(knns)[:, :new_k]
+            res['knn_tgts'] = take_(knn_tgts)[:, :new_k]
+            res['dist'] = take_(dist)[:, :new_k]
+            return res
+
+        res = rerank()
+        knns = res['knns']
+        knn_tgts = res['knn_tgts']
+        dist = res['dist']
+
         label = (knn_tgts == tgts.reshape(-1, 1, 1)).astype(np.int)
 
         knn_p = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
