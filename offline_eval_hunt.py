@@ -32,6 +32,9 @@ def print_color(x, c='HEADER'):
 def print_color_mid(*args, **kwargs):
     print(to_color_mid(*args, **kwargs))
 
+def to_color(x, c='HEADER'):
+    return getattr(bcolors, c) + x + bcolors.ENDC
+
 def to_color_mid(l, x, r, c='HEADER'):
     return l + getattr(bcolors, c) + x + bcolors.ENDC + r
 
@@ -134,17 +137,26 @@ def main(args):
         s = ' '.join([vocab.symbols[tok] for tok in x])
         return s
 
-    def pretty_eval_context(i, lsize=16, rsize=16):
+    def pretty_eval_context(i, lsize=32, rsize=8):
         l = tgts[i-lsize:i].reshape(-1)
         x = tgts[i].reshape(-1)
         r = tgts[i+1:i+1+rsize].reshape(-1)
         return to_color_mid(tostring(l) + ' ', tostring(x), ' ' + tostring(r), c='BOLD')
 
-    def pretty_key_context(i, lsize=16, rsize=16):
+    def pretty_key_context(i, lsize=32, rsize=8):
         l = trn_tgts[i-lsize:i].reshape(-1)
         x = trn_tgts[i].reshape(-1)
         r = trn_tgts[i+1:i+1+rsize].reshape(-1)
         return to_color_mid(tostring(l) + ' ', tostring(x), ' ' + tostring(r), c='BOLD')
+
+    def word_overlap(i, past=1024):
+        tgt_context = set(tgts[i-past:i].flatten().tolist())
+        wo = np.zeros(1024, dtype=np.int)
+
+        for i_j, j in enumerate(knns[i].flatten().tolist()):
+            trn_context = set(trn_tgts[j-past:j].flatten().tolist())
+            wo[i_j] = len(set.intersection(tgt_context, trn_context))
+        return wo
 
     for i in index.tolist():
         tgt = tgts[i].item()
@@ -154,8 +166,23 @@ def main(args):
         k_ppl = 2**(-np.log(kp_) / np.log(2))
         p_ppl = 2**(-np.log(p_) / np.log(2))
 
-        line ='{:>12} diff={:.3f} kp={:.3f}[{:.3f}] p={:.3f}[{:.3f}]'.format(
-            tgt, diff, kp_, k_ppl, p_, p_ppl
+        correct = np.sum(knn_tgts[i] == tgt)
+        total = knn_tgts.shape[1]
+        acc = correct  / total
+
+        below_threshold = tgt <= 1000
+        w = tostring(tgt)
+        wo = word_overlap(i)
+
+        # prob mass
+        dist_ = torch.from_numpy(dist[i].reshape(-1))
+        prob  = torch.softmax(dist_, 0)
+        logp =  torch.log_softmax(dist_, 0)
+        entropy = - torch.sum(prob * logp).item()
+
+        line ='{:>12} diff={:.3f} kp={:.3f}[{:.3f}] p={:.3f}[{:.3f}] acc={:.3f}[{}/{}] ent={:.3f} below_threshold={} w={}'.format(
+            tgt, diff, kp_, k_ppl, p_, p_ppl,
+            acc, correct, total, entropy, below_threshold, w,
             )
 
         print(line)
@@ -169,10 +196,15 @@ def main(args):
         for j in range(k):
             knn = knns[i, j].item()
             tgt_ = trn_tgts[knn].item()
-            if tgt != tgt_:
-                continue
+            pmass = prob[j].item()
+            matches = tgt == tgt_
+            if not matches and j > 16:
+                if pmass < 0.001:
+                    continue
+            wo_ = wo[j].item()
+            mbit = to_color('1', 'OKGREEN') if matches else to_color('0', 'FAIL')
             line = pretty_key_context(knn)
-            line = '{:>4}. {:>012} : '.format(j, knn) + line
+            line = '{:>4}. {:>012} : {} : {:>4} : {:.3f} : '.format(j, knn, mbit, wo_, pmass) + line
             print(line)
 
         print('')
