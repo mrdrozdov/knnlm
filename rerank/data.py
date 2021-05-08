@@ -14,12 +14,15 @@ import time
 import numpy as np
 import torch
 
+from tqdm import tqdm
+
 
 class KNNDataset(torch.utils.data.Dataset):
     def __init__(self, dstore, knn_dstore):
         super().__init__()
         self.dstore = dstore
         self.knn_dstore = knn_dstore
+        self.in_memory = InMemoryDataset(self)
 
     def __len__(self):
         return self.dstore.tgts.shape[0]
@@ -27,6 +30,46 @@ class KNNDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         item = self.dstore.tgts[index]
         return index, item
+
+
+class InMemoryDataset:
+    def __init__(self, dataset, max_size=2 * (10**6), batch_size=32):
+        self.dataset = dataset
+        self.max_size = max_size
+        self.batch_size = batch_size
+        self.reset()
+
+    def reset(self):
+        max_size = self.max_size
+        batch_size = self.batch_size
+        shape = (max_size + batch_size, 1024)
+        self.keys = np.empty(shape, dtype=np.float32)
+        self.u_knns = set()
+        self.batches = []
+        self.ready = False
+
+    def update(self, batch):
+        self.batches.append(batch)
+
+        knns = self.dataset.dstore.knns[batch]
+        u = np.unique(knns)
+        self.u_knns.update(u.tolist())
+
+        if len(self.u_knns) >= self.max_size:
+            self.load()
+
+    def load(self):
+        for knn in tqdm(self.u_knns, desc='load'):
+            # TODO: Fancy read.
+            pass
+        self.ready = True
+
+    def get_batches(self, force=False):
+        if force and not self.ready:
+            self.load()
+        for b in self.batches:
+            yield b
+        self.reset()
 
 
 class BatchSampler(torch.utils.data.Sampler):
@@ -45,12 +88,26 @@ class BatchSampler(torch.utils.data.Sampler):
         order = np.arange(n)
         np.random.shuffle(order)
 
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            batch = order[start:end]
-            if not self.include_partial and len(batch) < batch_size:
-                break
-            yield batch
+        d = self.dataset.in_memory
+
+        def i_():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                batch = order[start:end]
+                if not self.include_partial and len(batch) < batch_size:
+                    break
+                yield batch
+            yield None
+
+        for batch in i_():
+            done = batch is None
+            if not done:
+                d.update(batch)
+
+            if d.ready or done:
+                for b in d.get_batches(force=done):
+                    yield b
+
 
 def build_collate(dataset):
     def custom_collate_fn(batch):
