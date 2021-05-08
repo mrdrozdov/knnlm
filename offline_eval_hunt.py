@@ -127,7 +127,14 @@ def main(args):
     p = np.exp(logp)
     knn_logp = EvalUtil.get_knn_log_prob(tgts, dist, knn_tgts)
     knn_p = np.exp(knn_logp)
-    index = np.argsort(knn_p.reshape(-1) - p.reshape(-1))[::-1]
+    argmax = np.argmax(dist, axis=1).flatten()
+
+    if args.sort == 'diff':
+        index = np.argsort(knn_p.reshape(-1) - p.reshape(-1))[::-1]
+    elif args.sort == 'argmax':
+        index = np.argsort(np.argmax(dist, axis=1).flatten())[::-1]
+    elif args.sort == 'inv_diff':
+        index = np.argsort(p.reshape(-1) - knn_p.reshape(-1))[::-1]
 
     def tostring(x):
         if isinstance(x, np.ndarray):
@@ -179,10 +186,15 @@ def main(args):
         prob  = torch.softmax(dist_, 0)
         logp =  torch.log_softmax(dist_, 0)
         entropy = - torch.sum(prob * logp).item()
+        argmax_ = argmax[i].item()
+        valmax_ = prob[argmax_].item()
 
-        line ='{:>12} diff={:.3f} kp={:.3f}[{:.3f}] p={:.3f}[{:.3f}] acc={:.3f}[{}/{}] ent={:.3f} below_threshold={} w={}'.format(
+        if valmax_ < 0.1:
+            continue
+
+        line ='{:>12} diff={:.3f} kp={:.3f}[{:.3f}] p={:.3f}[{:.3f}] acc={:.3f}[{}/{}] ent={:.3f} argmax={} valmax={:.3f} below_threshold={} w={}'.format(
             tgt, diff, kp_, k_ppl, p_, p_ppl,
-            acc, correct, total, entropy, below_threshold, w,
+            acc, correct, total, entropy, argmax_, valmax_, below_threshold, w,
             )
 
         print(line)
@@ -236,6 +248,7 @@ if __name__ == '__main__':
     # debug
     parser.add_argument('--limit', default=-1, type=int)
     parser.add_argument('--preset', default='valid', type=str)
+    parser.add_argument('--sort', default='diff', type=str)
     parser.add_argument('--approx', action='store_true')
     args = parser.parse_args()
 
