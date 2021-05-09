@@ -7,7 +7,10 @@ Two approaches:
 
 """
 
+import ctypes
+import mmap
 
+import copy
 import os
 import time
 
@@ -20,11 +23,11 @@ from tqdm import tqdm
 
 
 class KNNDataset(torch.utils.data.Dataset):
-    def __init__(self, dstore, knn_dstore):
+    def __init__(self, dstore, knn_dstore, mp=False):
         super().__init__()
         self.dstore = dstore
         self.knn_dstore = knn_dstore
-        self.in_memory = InMemoryDataset(self)
+        self.in_memory = InMemoryDataset(self, mp=mp)
 
     def __len__(self):
         return self.dstore.tgts.shape[0]
@@ -35,28 +38,28 @@ class KNNDataset(torch.utils.data.Dataset):
 
 
 class Worker(multiprocessing.Process):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        print('init', self.name, args, kwargs)
+    def __init__(self, input_dict, result_dict):
+        super().__init__()
+        self.input_dict = input_dict
+        self.result_dict = result_dict
+
     def run(self, *args, **kwargs):
-        print('run', self.name, args, kwargs)
+        input_dict, result_dict = self.input_dict, self.result_dict
+        result_dict['u_keys'] = KeysUtil.fancy_read(**input_dict)
 
 
 class KeysUtil:
     @staticmethod
-    def fancy_read(dstore=None, path=None, offset=None, shape=None, u=None, batch_size=20000):
-        if dstore is None:
+    def fancy_read(keys=None, path=None, offset=None, shape=None, u=None, batch_size=5000000, position=None):
+        if keys is None:
             # Open file.
             keys = np.memmap(path, dtype=np.float32, mode='r', shape=shape, offset=offset)
-            u = u - offset
-        else:
-            keys = dstore.keys
 
         n = keys.shape[0]
         u_keys = np.empty((u.shape[0], 1024), dtype=np.float32)
         u_range = np.arange(u.shape[0])
         u_offset = 0
-        for start in tqdm(range(0, n, batch_size), desc='fancy_read'):
+        for start in tqdm(range(0, n, batch_size), desc='fancy_read', position=position):
             end = min(start + batch_size, n)
 
             # early exit
@@ -67,7 +70,10 @@ class KeysUtil:
             u_start = u_offset
             if start > u[u_start]:
                 continue
+            if u[u_start] >= end:
+                continue
             assert u[u_start] >= start
+            assert u[u_start] < end, (u[u_start], start, end)
 
             # select u end
             u_end = u_start
@@ -79,11 +85,26 @@ class KeysUtil:
             assert u[u_end] < end
 
             # keys
-            batch_u = u[u_start:u_end+1]
-            chunk_k = keys[start:end][:]
-            batch_k = chunk_k[batch_u - start]
+
+            # Read chunk.
+            if True:
+                batch_u = u[u_start:u_end+1]
+                chunk_k = keys[start:end]
+                batch_k = chunk_k[batch_u - start]
+
+            # Flexible read.
+            if False:
+                batch_u = u[u_start:u_end+1]
+                batch_k = keys[batch_u]
 
             u_keys[u_start:u_end+1] = batch_k
+
+            # madvise
+            madvise = ctypes.CDLL("libc.so.6").madvise
+            madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            madvise.restype = ctypes.c_int
+
+            assert madvise(keys.ctypes.data, keys.size * keys.dtype.itemsize, 1) == 0, "MADVISE FAILED" # 1 means MADV_RANDOM
 
         return u_keys
 
@@ -93,10 +114,11 @@ class KeysUtil:
 
 
 class InMemoryDataset:
-    def __init__(self, dataset, max_size=2 * (10**6), batch_size=32):
+    def __init__(self, dataset, max_size=4 * (10**6), batch_size=32, mp=False):
         self.dataset = dataset
         self.max_size = max_size
         self.batch_size = batch_size
+        self.mp = mp
         self.reset()
 
     def reset(self):
@@ -119,13 +141,34 @@ class InMemoryDataset:
             self.load()
 
     def fancy_read(self, u):
+        if self.mp:
+            return self.mp_fancy_read(u)
+
+        knn_dstore = self.dataset.knn_dstore
+        keys = knn_dstore.keys
+
+        if True:
+            # https://github.com/numpy/numpy/issues/13172#issue-423761095
+            madvise = ctypes.CDLL("libc.so.6").madvise
+            madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            madvise.restype = ctypes.c_int
+
+            assert madvise(keys.ctypes.data, keys.size * keys.dtype.itemsize, 1) == 0, "MADVISE FAILED" # 1 means MADV_RANDOM
+
+        u_keys = KeysUtil.fancy_read(keys=keys, u=u)
+        return u_keys
+
+    def mp_fancy_read(self, u):
         knn_dstore = self.dataset.knn_dstore
         path = os.path.join(knn_dstore.path, 'dstore_keys.npy')
         N = knn_dstore.keys.shape[0]
 
         u_keys = np.empty((u.shape[0], 1024), dtype=np.float32)
 
-        num_workers = 4
+        num_workers = 2
+        jobs = []
+        results = []
+        masks = []
 
         for i in range(num_workers):
             chunk_size = N // num_workers
@@ -140,9 +183,32 @@ class InMemoryDataset:
 
             mask = np.logical_and(u >= start, u < end)
             batch_u = u[mask]
-            batch_u_keys = KeysUtil.fancy_read(dstore=None, path=path, offset=offset, shape=shape, u=batch_u, batch_size=20000)
+            masks.append(mask)
 
-            u_keys[mask] = batch_u_keys
+            input_dict = {}
+            input_dict['path'] = path
+            input_dict['offset'] = offset
+            input_dict['shape'] = shape
+            input_dict['u'] = batch_u - start
+            input_dict['position'] = i
+
+            result_dict = {}
+            results.append(result_dict)
+
+            print(i, batch_u.shape)
+
+            p = Worker(input_dict=input_dict, result_dict=result_dict)
+            jobs.append(p)
+
+        for j in jobs:
+            j.start()
+
+        for j in jobs:
+            j.join()
+
+        for r, m in zip(results, masks):
+            batch_u_keys = r['u_keys']
+            u_keys[m] = batch_u_keys
 
         return u_keys
 
@@ -293,7 +359,7 @@ def demo():
     knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
     knn_dstore.initialize(include_keys=True)
 
-    dataset = KNNDataset(dstore_, knn_dstore)
+    dataset = KNNDataset(dstore_, knn_dstore, mp=args.mp)
     sampler = BatchSampler(dataset, batch_size=batch_size)
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -323,6 +389,7 @@ if __name__ == '__main__':
     # dstore
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--n-workers', default=0, type=int)
+    parser.add_argument('--mp', action='store_true')
     args = parser.parse_args()
     demo()
 
