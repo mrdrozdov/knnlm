@@ -11,6 +11,8 @@ Two approaches:
 import os
 import time
 
+import multiprocessing
+
 import numpy as np
 import torch
 
@@ -32,6 +34,64 @@ class KNNDataset(torch.utils.data.Dataset):
         return index, item
 
 
+class Worker(multiprocessing.Process):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print('init', self.name, args, kwargs)
+    def run(self, *args, **kwargs):
+        print('run', self.name, args, kwargs)
+
+
+class KeysUtil:
+    @staticmethod
+    def fancy_read(dstore=None, path=None, offset=None, shape=None, u=None, batch_size=20000):
+        if dstore is None:
+            # Open file.
+            keys = np.memmap(path, dtype=np.float32, mode='r', shape=shape, offset=offset)
+            u = u - offset
+        else:
+            keys = dstore.keys
+
+        n = keys.shape[0]
+        u_keys = np.empty((u.shape[0], 1024), dtype=np.float32)
+        u_range = np.arange(u.shape[0])
+        u_offset = 0
+        for start in tqdm(range(0, n, batch_size), desc='fancy_read'):
+            end = min(start + batch_size, n)
+
+            # early exit
+            if u_offset >= u.shape[0]:
+                break
+
+            # select u start
+            u_start = u_offset
+            if start > u[u_start]:
+                continue
+            assert u[u_start] >= start
+
+            # select u end
+            u_end = u_start
+            for i in range(u_start, u.shape[0]):
+                if u[i] >= end:
+                    break
+                u_end = i
+            u_offset = u_end + 1
+            assert u[u_end] < end
+
+            # keys
+            batch_u = u[u_start:u_end+1]
+            chunk_k = keys[start:end][:]
+            batch_k = chunk_k[batch_u - start]
+
+            u_keys[u_start:u_end+1] = batch_k
+
+        return u_keys
+
+    @staticmethod
+    def offset_func(offset, rowsize=1024):
+        return offset * rowsize * int(32 / 8)
+
+
 class InMemoryDataset:
     def __init__(self, dataset, max_size=2 * (10**6), batch_size=32):
         self.dataset = dataset
@@ -43,8 +103,8 @@ class InMemoryDataset:
         max_size = self.max_size
         batch_size = self.batch_size
         shape = (max_size + batch_size, 1024)
-        self.keys = np.empty(shape, dtype=np.float32)
-        self.u_knns = set()
+        self.u_keys = None
+        self.u_knns_ = set()
         self.batches = []
         self.ready = False
 
@@ -53,15 +113,49 @@ class InMemoryDataset:
 
         knns = self.dataset.dstore.knns[batch]
         u = np.unique(knns)
-        self.u_knns.update(u.tolist())
+        self.u_knns_.update(u.tolist())
 
-        if len(self.u_knns) >= self.max_size:
+        if len(self.u_knns_) >= self.max_size:
             self.load()
 
+    def fancy_read(self, u):
+        knn_dstore = self.dataset.knn_dstore
+        path = os.path.join(knn_dstore.path, 'dstore_keys.npy')
+        N = knn_dstore.keys.shape[0]
+
+        u_keys = np.empty((u.shape[0], 1024), dtype=np.float32)
+
+        num_workers = 4
+
+        for i in range(num_workers):
+            chunk_size = N // num_workers
+            start = i * chunk_size
+            if i < num_workers - 1:
+                end = start + chunk_size
+            else:
+                end = N
+
+            offset = KeysUtil.offset_func(start)
+            shape = (end - start, 1024)
+
+            mask = np.logical_and(u >= start, u < end)
+            batch_u = u[mask]
+            batch_u_keys = KeysUtil.fancy_read(dstore=None, path=path, offset=offset, shape=shape, u=batch_u, batch_size=20000)
+
+            u_keys[mask] = batch_u_keys
+
+        return u_keys
+
     def load(self):
-        for knn in tqdm(self.u_knns, desc='load'):
-            # TODO: Fancy read.
-            pass
+        batch = np.concatenate(self.batches)
+        knns = self.dataset.dstore.knns[batch]
+        u, inverse = np.unique(knns, return_inverse=True)
+        assert len(u) == len(self.u_knns_)
+        print('fancy load for knns = {} with unique = {}'.format(knns.shape, u.shape))
+        u_keys = self.fancy_read(u)
+        self.u_knns = u
+        self.u_knns_inverse = inverse
+        self.u_keys = u_keys
         self.ready = True
 
     def get_batches(self, force=False):
@@ -121,24 +215,26 @@ def build_collate(dataset):
         batch_map['index'] = index
         batch_map['items_list'] = items_list
 
-        dstore = dataset.dstore
-        knn_dstore = dataset.knn_dstore
+        # TODO: Use the in-memory dataset.
+        if False:
+            dstore = dataset.dstore
+            knn_dstore = dataset.knn_dstore
 
-        knns = dstore.knns[index]
+            knns = dstore.knns[index]
 
-        print('uniq')
-        u, inverse = np.unique(knns, return_inverse=True)
-        u_keys = np.zeros((u.shape[0], 1024), dtype=np.float32)
+            print('uniq')
+            u, inverse = np.unique(knns, return_inverse=True)
+            u_keys = np.zeros((u.shape[0], 1024), dtype=np.float32)
 
-        def offset_fn(offset, rowsize=1024):
-            return offset * rowsize * int(32 / 8)
+            def offset_fn(offset, rowsize=1024):
+                return offset * rowsize * int(32 / 8)
 
-        print('read')
-        u_keys = knn_dstore.keys[u]
+            print('read')
+            u_keys = knn_dstore.keys[u]
 
-        print('write')
-        keys = u_keys[inverse]
-        batch_map['keys'] = keys
+            print('write')
+            keys = u_keys[inverse]
+            batch_map['keys'] = keys
 
         return batch_map
     return custom_collate_fn
