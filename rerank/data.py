@@ -30,20 +30,6 @@ import torch
 from tqdm import tqdm
 
 
-class KNNDataset(torch.utils.data.Dataset):
-    def __init__(self, dstore, knn_dstore, mp=False):
-        super().__init__()
-        self.dstore = dstore
-        self.knn_dstore = knn_dstore
-        self.in_memory = InMemoryDataset(self, mp=mp)
-
-    def __len__(self):
-        return self.dstore.tgts.shape[0]
-
-    def __getitem__(self, index):
-        item = self.dstore.tgts[index]
-        return index, item
-
 
 class KNNFoldDataset(torch.utils.data.Dataset):
     def __init__(self, fold, fold_info):
@@ -57,17 +43,6 @@ class KNNFoldDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         item = self.fold_info.index[index]
         return index, item
-
-
-class Worker(multiprocessing.Process):
-    def __init__(self, input_dict, result_dict):
-        super().__init__()
-        self.input_dict = input_dict
-        self.result_dict = result_dict
-
-    def run(self, *args, **kwargs):
-        input_dict, result_dict = self.input_dict, self.result_dict
-        result_dict['u_keys'] = KeysUtil.fancy_read(**input_dict)
 
 
 class KeysUtil:
@@ -135,124 +110,6 @@ class KeysUtil:
         return offset * rowsize * int(32 / 8)
 
 
-class InMemoryDataset:
-    def __init__(self, dataset, max_size=4 * (10**6), batch_size=32, mp=False):
-        self.dataset = dataset
-        self.max_size = max_size
-        self.batch_size = batch_size
-        self.mp = mp
-        self.reset()
-
-    def reset(self):
-        max_size = self.max_size
-        batch_size = self.batch_size
-        shape = (max_size + batch_size, 1024)
-        self.u_keys = None
-        self.u_knns_ = set()
-        self.batches = []
-        self.ready = False
-
-    def update(self, batch):
-        self.batches.append(batch)
-
-        knns = self.dataset.dstore.knns[batch]
-        u = np.unique(knns)
-        self.u_knns_.update(u.tolist())
-
-        if len(self.u_knns_) >= self.max_size:
-            self.load()
-
-    def fancy_read(self, u):
-        if self.mp:
-            return self.mp_fancy_read(u)
-
-        knn_dstore = self.dataset.knn_dstore
-        keys = knn_dstore.keys
-
-        if True:
-            # https://github.com/numpy/numpy/issues/13172#issue-423761095
-            madvise = ctypes.CDLL("libc.so.6").madvise
-            madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-            madvise.restype = ctypes.c_int
-
-            assert madvise(keys.ctypes.data, keys.size * keys.dtype.itemsize, 1) == 0, "MADVISE FAILED" # 1 means MADV_RANDOM
-
-        u_keys = KeysUtil.fancy_read(keys=keys, u=u)
-        return u_keys
-
-    def mp_fancy_read(self, u):
-        knn_dstore = self.dataset.knn_dstore
-        path = os.path.join(knn_dstore.path, 'dstore_keys.npy')
-        N = knn_dstore.keys.shape[0]
-
-        u_keys = np.empty((u.shape[0], 1024), dtype=np.float32)
-
-        num_workers = 2
-        jobs = []
-        results = []
-        masks = []
-
-        for i in range(num_workers):
-            chunk_size = N // num_workers
-            start = i * chunk_size
-            if i < num_workers - 1:
-                end = start + chunk_size
-            else:
-                end = N
-
-            offset = KeysUtil.offset_func(start)
-            shape = (end - start, 1024)
-
-            mask = np.logical_and(u >= start, u < end)
-            batch_u = u[mask]
-            masks.append(mask)
-
-            input_dict = {}
-            input_dict['path'] = path
-            input_dict['offset'] = offset
-            input_dict['shape'] = shape
-            input_dict['u'] = batch_u - start
-            input_dict['position'] = i
-
-            result_dict = {}
-            results.append(result_dict)
-
-            print(i, batch_u.shape)
-
-            p = Worker(input_dict=input_dict, result_dict=result_dict)
-            jobs.append(p)
-
-        for j in jobs:
-            j.start()
-
-        for j in jobs:
-            j.join()
-
-        for r, m in zip(results, masks):
-            batch_u_keys = r['u_keys']
-            u_keys[m] = batch_u_keys
-
-        return u_keys
-
-    def load(self):
-        batch = np.concatenate(self.batches)
-        knns = self.dataset.dstore.knns[batch]
-        u, inverse = np.unique(knns, return_inverse=True)
-        assert len(u) == len(self.u_knns_)
-        print('fancy load for knns = {} with unique = {}'.format(knns.shape, u.shape))
-        u_keys = self.fancy_read(u)
-        self.u_knns = u
-        self.u_knns_inverse = inverse
-        self.u_keys = u_keys
-        self.ready = True
-
-    def get_batches(self, force=False):
-        if force and not self.ready:
-            self.load()
-        for b in self.batches:
-            yield b
-        self.reset()
-
 
 class BatchSampler(torch.utils.data.Sampler):
     def __init__(self, dataset, batch_size=32, include_partial=True):
@@ -262,7 +119,7 @@ class BatchSampler(torch.utils.data.Sampler):
         self.include_partial = include_partial
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.dataset) // self.batch_size
 
     def __iter__(self):
         batch_size = self.batch_size
@@ -318,43 +175,6 @@ def build_collate_fold(context, dataset):
         batch_map['knn_tgts'] = batch_knn_tgts
         batch_map['dist'] = batch_dist
         batch_map['tgts'] = batch_tgts
-
-        return batch_map
-    return custom_collate_fn
-
-
-def build_collate(dataset):
-    def custom_collate_fn(batch):
-        index, items_list = zip(*batch)
-
-        print('[collate] PID = {}, first = {}'.format(os.getpid(), index[0]))
-
-        index = np.array(index)
-
-        batch_map = {}
-        batch_map['index'] = index
-        batch_map['items_list'] = items_list
-
-        # TODO: Use the in-memory dataset.
-        if False:
-            dstore = dataset.dstore
-            knn_dstore = dataset.knn_dstore
-
-            knns = dstore.knns[index]
-
-            print('uniq')
-            u, inverse = np.unique(knns, return_inverse=True)
-            u_keys = np.zeros((u.shape[0], 1024), dtype=np.float32)
-
-            def offset_fn(offset, rowsize=1024):
-                return offset * rowsize * int(32 / 8)
-
-            print('read')
-            u_keys = knn_dstore.keys[u]
-
-            print('write')
-            keys = u_keys[inverse]
-            batch_map['keys'] = keys
 
         return batch_map
     return custom_collate_fn
@@ -557,25 +377,6 @@ def demo():
         rmax = mask.sum(1).max()
         ravg = mask.sum(1).mean()
         print('[batch] row(min = {}, max = {}, mean = {}'.format(rmin, rmax, ravg))
-        time.sleep(1)
-
-
-    sys.exit()
-    #
-
-    dataset = KNNDataset(dstore_, knn_dstore, mp=args.mp)
-    sampler = BatchSampler(dataset, batch_size=batch_size)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        shuffle=(sampler is None),
-        num_workers=num_workers,
-        batch_sampler=sampler,
-        collate_fn=build_collate(dataset),
-        )
-
-    for batch_map in loader:
-        index = batch_map['index']
-        print('[batch] PID = {}, first = {}'.format(os.getpid(), index[0]))
         time.sleep(1)
 
 if __name__ == '__main__':
