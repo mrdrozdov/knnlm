@@ -5,9 +5,17 @@ Two approaches:
     2. Every N batches read a subset of data into memory, and always read from this in-memory cache.
 
 
+Suggested approach:
+
+    1. At beginning of training sample N rows from the validation set to use for training
+        where N should roughly fill memory.
+    2. Run M experiments, and ensemble the approaches.
+
+
 """
 
 import ctypes
+import hurry.filesize
 import mmap
 
 import copy
@@ -37,6 +45,20 @@ class KNNDataset(torch.utils.data.Dataset):
         return index, item
 
 
+class KNNFoldDataset(torch.utils.data.Dataset):
+    def __init__(self, fold, fold_info):
+        super().__init__()
+        self.fold = fold
+        self.fold_info = fold_info
+
+    def __len__(self):
+        return self.fold_info.index.shape[0]
+
+    def __getitem__(self, index):
+        item = self.fold_info.index[index]
+        return index, item
+
+
 class Worker(multiprocessing.Process):
     def __init__(self, input_dict, result_dict):
         super().__init__()
@@ -50,7 +72,7 @@ class Worker(multiprocessing.Process):
 
 class KeysUtil:
     @staticmethod
-    def fancy_read(keys=None, path=None, offset=None, shape=None, u=None, batch_size=5000000, position=None):
+    def fancy_read(keys=None, path=None, offset=None, shape=None, u=None, batch_size=500000, position=None):
         if keys is None:
             # Open file.
             keys = np.memmap(path, dtype=np.float32, mode='r', shape=shape, offset=offset)
@@ -248,25 +270,57 @@ class BatchSampler(torch.utils.data.Sampler):
         order = np.arange(n)
         np.random.shuffle(order)
 
-        d = self.dataset.in_memory
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            batch = order[start:end]
+            if not self.include_partial and len(batch) < batch_size:
+                break
+            yield batch
 
-        def i_():
-            for start in range(0, n, batch_size):
-                end = min(start + batch_size, n)
-                batch = order[start:end]
-                if not self.include_partial and len(batch) < batch_size:
-                    break
-                yield batch
-            yield None
 
-        for batch in i_():
-            done = batch is None
-            if not done:
-                d.update(batch)
+def build_collate_fold(context, dataset):
+    def custom_collate_fn(batch):
+        index, items = zip(*batch)
+        index = np.array(index)
+        items = np.array(items)
 
-            if d.ready or done:
-                for b in d.get_batches(force=done):
-                    yield b
+        # vars
+        batch_size = items.shape[0]
+        fold = dataset.fold
+        fold_info = dataset.fold_info
+        knns = context['dstore'].knns
+        knn_tgts = context['dstore'].knn_tgts
+        dist = context['dstore'].dist
+        tgts = context['dstore'].tgts
+        knns_mask = fold_info.mask
+        k = knns.shape[1]
+        assert knns.shape == knns_mask.shape
+
+        # batch
+        batch_knns = knns[items]
+        batch_knn_tgts = knn_tgts[items]
+        batch_dist = dist[items]
+        batch_tgts = tgts[items]
+        batch_mask = knns_mask[items]
+
+        # batch keys
+        batch_keys = np.zeros((batch_size * k, 1024), dtype=np.float32)
+        knns_ = batch_knns[batch_mask]
+        idx_ = np.array([fold_info.knn_TO_idx[x] for x in knns_.tolist()])
+        batch_keys[batch_mask.reshape(-1)] = fold_info.u_keys[idx_]
+        batch_keys = batch_keys.reshape(batch_size, k, 1024)
+
+        # batch_map
+        batch_map = {}
+        batch_map['mask'] = batch_mask
+        batch_map['keys'] = batch_keys
+        batch_map['knns'] = batch_knns
+        batch_map['knn_tgts'] = batch_knn_tgts
+        batch_map['dist'] = batch_dist
+        batch_map['tgts'] = batch_tgts
+
+        return batch_map
+    return custom_collate_fn
 
 
 def build_collate(dataset):
@@ -327,17 +381,24 @@ class Dstore:
         self.knn_tgts = np.memmap(os.path.join(path, 'lookup_knn_tgts.npy'), dtype=np.int, mode='r', shape=(self.dstore_size, k, 1))
         self.dist = np.memmap(os.path.join(path, 'lookup_dist.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
 
+    def add_exact(self, path, k):
+        self.exact = np.memmap(os.path.join(path, 'lookup_exact.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, k, 1))
+
 
 class InMemoryDstore:
     def __init__(self, dstore):
         self.dstore = dstore
 
     @staticmethod
-    def from_dstore(dstore, keys=['tgts', 'knns', 'knn_tgts']):
+    def from_dstore(dstore, keys=['tgts', 'knns', 'knn_tgts', 'exact']):
         new_dstore = InMemoryDstore(dstore)
         for k in keys:
-            x = npy_copy(getattr(dstore, k))
-            setattr(new_dstore, k, x)
+            if k == 'exact':
+                x = -npy_copy(getattr(dstore, k))
+                setattr(new_dstore, 'dist', x)
+            else:
+                x = npy_copy(getattr(dstore, k))
+                setattr(new_dstore, k, x)
         return new_dstore
 
 
@@ -347,6 +408,112 @@ def npy_copy(x):
     return out
 
 
+class FoldInfo:
+    def __init__(self, fold, index, mask, u_knns, u_keys):
+        self.fold = fold
+        self.index = index
+        self.mask = mask
+        self.u_knns = u_knns
+        self.u_keys = u_keys
+
+
+def select_fold_knns_and_keys(context, fold, include_first=16, max_keys=1000000, max_rows=20000):
+
+    dstore = context['dstore']
+    knn_dstore = context['knn_dstore']
+    knns = dstore.knns
+    n = knns.shape[0]
+
+    print('[fold] shape={}'.format(fold.shape))
+
+    index = fold.copy()
+    np.random.shuffle(index)
+    index = index[:max_rows]
+
+    u_first = np.unique(knns[index, :include_first])
+
+    print('[fold] include_first = {}, u_first = {}'.format(include_first, u_first.shape[0]))
+
+    u_all = set(u_first.tolist())
+
+    knn_mask = np.zeros(knns.shape, dtype=np.bool)
+    knn_mask[index, :include_first] = True
+
+    bucket_size = 128
+    num_buckets = 1024 // bucket_size
+
+    max_iterations = 100
+    for i in range(max_iterations):
+        local_knn = knns[index]
+        local_mask = np.random.choice([True, False], size=local_knn.shape, p=[0.025, 0.975])
+        local_mask = np.logical_and(knn_mask[index] == False, local_mask)
+        local_knns_ = local_knn[local_mask]
+        u_local = np.unique(local_knns_)
+
+        # Update count.
+        u_all.update(u_local.tolist())
+
+        # Update mask.
+        knn_mask[index] = np.logical_or(knn_mask[index], local_mask)
+
+        print('i = {}, u_all = {}, size = {}'.format(i, len(u_all), hurry.filesize.size(len(u_all) * 1024 * 4)))
+
+        if len(u_all) > max_keys:
+            break
+
+    u_knns = np.array(sorted(u_all))
+    u_keys = KeysUtil.fancy_read(keys=knn_dstore.keys, u=u_knns)
+    del u_all
+
+    knn_TO_idx = {x: i for i, x in enumerate(u_knns.tolist())}
+
+    fold_info = FoldInfo(fold, index, mask=knn_mask, u_knns=u_knns, u_keys=u_keys)
+    fold_info.knn_TO_idx = knn_TO_idx
+
+    return fold_info
+
+
+def build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, include_first=16, max_rows=20000):
+    """
+    1. Randomly select max rows from training. Only choose from the rows valid for training.
+    2. From selected, choose up a number of knns without exceeding max keys.
+    3. The remaining fold is used for validation.
+    """
+
+    dstore = context['dstore']
+    knn_dstore = context['knn_dstore']
+    knns = dstore.knns
+    n = knns.shape[0]
+
+    start = (fold_id // total) * n
+    end = min(start + (n // total), n)
+    dev_fold = np.arange(start, end)
+
+    if fold_id == 0:
+        start = dev_fold[-1] + 1
+        end = n
+        trn_fold = np.arange(start, end)
+    elif fold_id == total - 1:
+        start = 0
+        end = dev_fold[0]
+        trn_fold = np.arange(start, end)
+    else:
+        assert fold_id < total and fold_id > 0
+        start = 0
+        end = dev_fold[0]
+        trn_fold = np.arange(start, end)
+        start = dev_fold[-1] + 1
+        end = n
+        trn_fold = np.concatenate(trn_fold, np.arange(start, end))
+
+    trn_fold_info = select_fold_knns_and_keys(context, trn_fold, include_first=include_first, max_keys=max_keys, max_rows=max_rows)
+
+    context['trn_fold'] = trn_fold
+    context['trn_fold_info'] = trn_fold_info
+
+    return context
+
+
 def demo():
     num_workers = args.n_workers
     batch_size = args.batch_size
@@ -354,10 +521,47 @@ def demo():
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
     dstore.initialize()
     dstore.add_neighbors(args.lookup, args.lookup_k)
+    dstore.add_exact(args.lookup, args.lookup_k)
     dstore_ = InMemoryDstore.from_dstore(dstore)
 
     knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
     knn_dstore.initialize(include_keys=True)
+
+    # build fold
+    context = {}
+    context['dstore'] = dstore_
+    context['knn_dstore'] = knn_dstore
+
+    if args.demo:
+        context = build_fold_for_epoch(context, total=2, fold_id=0, max_keys=100000, max_rows=1000)
+
+    else:
+        context = build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000)
+
+    # build dataset, sampler, loader
+    trn_fold = context['trn_fold']
+    trn_fold_info = context['trn_fold_info']
+    dataset = KNNFoldDataset(trn_fold, trn_fold_info)
+    sampler = BatchSampler(dataset, batch_size=batch_size)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        shuffle=(sampler is None),
+        num_workers=num_workers,
+        batch_sampler=sampler,
+        collate_fn=build_collate_fold(context, dataset),
+        )
+
+    for batch_map in loader:
+        mask = batch_map['mask']
+        rmin = mask.sum(1).min()
+        rmax = mask.sum(1).max()
+        ravg = mask.sum(1).mean()
+        print('[batch] row(min = {}, max = {}, mean = {}'.format(rmin, rmax, ravg))
+        time.sleep(1)
+
+
+    sys.exit()
+    #
 
     dataset = KNNDataset(dstore_, knn_dstore, mp=args.mp)
     sampler = BatchSampler(dataset, batch_size=batch_size)
@@ -390,6 +594,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--n-workers', default=0, type=int)
     parser.add_argument('--mp', action='store_true')
+    parser.add_argument('--demo', action='store_true')
     args = parser.parse_args()
     demo()
 
