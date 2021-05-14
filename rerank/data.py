@@ -176,6 +176,33 @@ def build_collate_fold(context, dataset):
         batch_map['dist'] = batch_dist
         batch_map['tgts'] = batch_tgts
 
+        # clean
+        tgts = batch_map['tgts']
+        keys = batch_map['keys']
+        knn_tgts = batch_map['knn_tgts']
+        mask = batch_map['mask']
+        m = mask.sum()
+        batch_size = tgts.shape[0]
+        k = 1024
+        input_size = 1024
+
+        # TODO: Move this into collate?
+        b = torch.zeros(m, dtype=torch.long)
+        x = torch.zeros(m, input_size, dtype=torch.float)
+        y = torch.zeros(m, dtype=torch.long)
+
+        b[:] = torch.from_numpy(np.arange(batch_size).repeat(k).reshape(batch_size, k)[mask.reshape(batch_size, k)]).long()
+        x[:] = torch.from_numpy(keys.reshape(-1, input_size)[mask.reshape(-1)]).float()
+
+        batch_tgts = tgts[np.arange(batch_size).repeat(k).reshape(batch_size, k)[mask.reshape(batch_size, k)]].reshape(-1)
+        batch_knn_tgts = knn_tgts[mask].reshape(-1)
+
+        y[:] = torch.from_numpy(batch_tgts == batch_knn_tgts).bool()
+
+        batch_map['b'] = b
+        batch_map['x'] = x
+        batch_map['y'] = y
+
         return batch_map
     return custom_collate_fn
 

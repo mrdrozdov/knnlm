@@ -117,7 +117,11 @@ class Net(nn.Module):
         mask = batch_map['mask']
         tgts = batch_map['tgts']
 
-        b, x, y = self.clean_batch(tgts, knn_tgts, keys, mask)
+        #b, x, y = self.clean_batch(tgts, knn_tgts, keys, mask)
+        device = self.device
+        b = batch_map['b'].to(device)
+        x = batch_map['x'].to(device)
+        y = batch_map['y'].to(device)
 
         s = self.enc(x)
 
