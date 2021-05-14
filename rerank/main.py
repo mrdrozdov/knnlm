@@ -24,13 +24,14 @@ class Encoder(nn.Module):
     def __init__(self, input_size=1024, size=100):
         super().__init__()
         self.enc = nn.Sequential(
-            nn.Linear(input_size, size),
+            nn.Linear(2 * input_size, size),
             nn.ReLU(),
             nn.Linear(size, 1),
             )
 
-    def forward(self, x):
-        return self.enc(x)
+    def forward(self, q, x):
+        inp = torch.cat([q, x], 1)
+        return self.enc(inp)
 
 
 class Loss(nn.Module):
@@ -120,10 +121,11 @@ class Net(nn.Module):
         #b, x, y = self.clean_batch(tgts, knn_tgts, keys, mask)
         device = self.device
         b = batch_map['b'].to(device)
+        q = batch_map['q'].to(device)
         x = batch_map['x'].to(device)
         y = batch_map['y'].to(device)
 
-        s = self.enc(x)
+        s = self.enc(q, x)
 
         loss_output = self.loss(b, s, y)
 
@@ -162,7 +164,7 @@ def main(args):
     batch_size = args.batch_size
 
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
-    dstore.initialize()
+    dstore.initialize(include_keys=True)
     dstore.add_neighbors(args.lookup, args.lookup_k)
     dstore.add_exact(args.lookup, args.lookup_k)
     dstore_ = InMemoryDstore.from_dstore(dstore)

@@ -149,6 +149,7 @@ def build_collate_fold(context, dataset):
         knn_tgts = context['dstore'].knn_tgts
         dist = context['dstore'].dist
         tgts = context['dstore'].tgts
+        queries = context['dstore'].queries
         knns_mask = fold_info.mask
         k = knns.shape[1]
         assert knns.shape == knns_mask.shape
@@ -158,6 +159,7 @@ def build_collate_fold(context, dataset):
         batch_knn_tgts = knn_tgts[items]
         batch_dist = dist[items]
         batch_tgts = tgts[items]
+        batch_queries = queries[items]
         batch_mask = knns_mask[items]
 
         # batch keys
@@ -170,6 +172,7 @@ def build_collate_fold(context, dataset):
         # batch_map
         batch_map = {}
         batch_map['mask'] = batch_mask
+        batch_map['queries'] = batch_queries
         batch_map['keys'] = batch_keys
         batch_map['knns'] = batch_knns
         batch_map['knn_tgts'] = batch_knn_tgts
@@ -200,6 +203,7 @@ def build_collate_fold(context, dataset):
         y[:] = torch.from_numpy(batch_tgts == batch_knn_tgts).bool()
 
         batch_map['b'] = b
+        batch_map['q'] = torch.from_numpy(batch_queries[b]).float()
         batch_map['x'] = x
         batch_map['y'] = y
 
@@ -237,14 +241,15 @@ class InMemoryDstore:
         self.dstore = dstore
 
     @staticmethod
-    def from_dstore(dstore, keys=['tgts', 'knns', 'knn_tgts', 'exact']):
+    def from_dstore(dstore, keys=['tgts', 'knns', 'knn_tgts', 'exact', 'keys']):
         new_dstore = InMemoryDstore(dstore)
         for k in keys:
+            x = npy_copy(getattr(dstore, k))
             if k == 'exact':
-                x = -npy_copy(getattr(dstore, k))
-                setattr(new_dstore, 'dist', x)
+                setattr(new_dstore, 'dist', -x)
+            elif k == 'keys':
+                setattr(new_dstore, 'queries', x)
             else:
-                x = npy_copy(getattr(dstore, k))
                 setattr(new_dstore, k, x)
         return new_dstore
 
@@ -370,7 +375,7 @@ def demo():
     batch_size = args.batch_size
 
     dstore = Dstore(args.dstore, args.dstore_size, 1024)
-    dstore.initialize()
+    dstore.initialize(include_keys=True)
     dstore.add_neighbors(args.lookup, args.lookup_k)
     dstore.add_exact(args.lookup, args.lookup_k)
     dstore_ = InMemoryDstore.from_dstore(dstore)
