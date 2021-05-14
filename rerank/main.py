@@ -51,16 +51,22 @@ class Loss(nn.Module):
             local_s = s[mask]
             local_y = y[mask]
 
-            for i in range(m):
-                for j in range(m):
+            # Positives should be ranked higher than negatives.
+            for i in range(m): #{0}
+                for j in range(m): #{1}
+
+                    # Skip duplicates.
                     if j <= i:
                         continue
+
+                    # Ignore any agreement.
                     if local_y[i].item() == local_y[j].item():
                         continue
 
                     new_b.append(i_b)
-                    d.append(local_s[i] - local_s[j])
-                    z.append(local_y[i].item() == True)
+
+                    d.append(local_s[i] - local_s[j]) # Small value indicates #{1} is ranked higher.
+                    z.append(local_y[i].item() == True) # True indicates the itesm are ranked correctly (#{0} > #{1}).
 
         if len(d) == 0:
             raise EmptyBatchException
@@ -72,7 +78,12 @@ class Loss(nn.Module):
 
         loss = nn.BCEWithLogitsLoss()(d, z)
 
-        return loss
+        output = {}
+        output['loss'] = loss
+        output['logits'] = d.detach()
+        output['labels'] = z.detach()
+
+        return output
 
 
 class Net(nn.Module):
@@ -130,9 +141,35 @@ class Net(nn.Module):
         b, x, y = self.clean_batch(tgts, knn_tgts, keys, mask)
 
         s = self.enc(x)
-        loss = self.loss(b, s, y)
+        loss_output = self.loss(b, s, y)
 
-        return loss
+        loss = loss_output['loss']
+
+        output = {}
+        output['loss'] = loss
+        output['logits'] = loss_output['logits']
+        output['labels'] = loss_output['labels']
+
+        return output
+
+
+def run_eval(batch_map, model_output):
+    logits = model_output['logits']
+    labels = model_output['labels']
+
+    pred = torch.sigmoid(logits).round()
+    assert torch.all(pred >= 0).item() == True
+    assert torch.all(pred <= 1).item() == True
+
+    correct = (pred == labels).sum().item()
+    total = labels.shape[0]
+
+    output = {}
+    output['correct'] = correct
+    output['total'] = total
+
+    return output
+
 
 
 
@@ -156,10 +193,10 @@ def main(args):
     context['knn_dstore'] = knn_dstore
 
     if args.demo:
-        context = build_fold_for_epoch(context, total=2, fold_id=0, include_first=8, max_keys=1000, max_rows=100)
+        context = build_fold_for_epoch(context, total=2, fold_id=0, include_first=8, max_keys=1000, max_rows=100, skip_read=args.skip_read)
 
     else:
-        context = build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000)
+        context = build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, skip_read=args.skip_read)
 
     # build dataset, sampler, loader
     trn_fold = context['trn_fold']
@@ -187,19 +224,30 @@ def main(args):
 
         for batch_map in tqdm(loader, desc='train'):
             try:
-                loss = net(batch_map)
+                model_output = net(batch_map)
             except EmptyBatchException:
                 epoch_stats['skip'] += 1
                 continue
+            loss = model_output['loss']
             opt.zero_grad()
             loss.backward()
             opt.step()
 
+            eval_output = run_eval(batch_map, model_output)
+
             epoch_metrics['loss'].append(loss.item())
+            epoch_metrics['correct'].append(eval_output['correct'])
+            epoch_metrics['total'].append(eval_output['total'])
 
         print('epoch: {}'.format(epoch))
         print('epoch-debug: {}'.format(json.dumps(epoch_debug)))
         print('avg-loss: {:.3f}'.format(np.mean(epoch_metrics['loss'])))
+
+        correct = np.sum(epoch_metrics['correct'])
+        total = np.sum(epoch_metrics['total'])
+        acc = correct / total
+
+        print('acc: {:.5f} ({}/{})'.format(acc, correct, total))
 
 if __name__ == '__main__':
     import argparse
@@ -221,6 +269,7 @@ if __name__ == '__main__':
     parser.add_argument('--n-workers', default=0, type=int)
     parser.add_argument('--mp', action='store_true')
     parser.add_argument('--demo', action='store_true')
+    parser.add_argument('--skip-read', action='store_true')
     args = parser.parse_args()
     main(args)
 
