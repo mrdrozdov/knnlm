@@ -38,43 +38,21 @@ class Loss(nn.Module):
         super().__init__()
 
     def forward(self, b, s, y):
-        new_b = []
-        d = []
-        z = []
 
-        u_b = torch.unique(b)
+        r = torch.arange(b.shape[0], device=b.device)
 
-        for i_b in u_b.tolist():
-            mask = b == i_b
-            m = mask.sum().item()
+        m_b = b.view(-1, 1) == b.view(1, -1) # same batch id
+        m_y = torch.logical_xor(y.view(-1, 1), y.view(1, -1)) # different labels
+        m_r = r.view(-1, 1) < r.view(1, -1) # prevent duplicates
+        m = torch.logical_and(torch.logical_and(m_b, m_y), m_r)
 
-            local_s = s[mask]
-            local_y = y[mask]
-
-            # Positives should be ranked higher than negatives.
-            for i in range(m): #{0}
-                for j in range(m): #{1}
-
-                    # Skip duplicates.
-                    if j <= i:
-                        continue
-
-                    # Ignore any agreement.
-                    if local_y[i].item() == local_y[j].item():
-                        continue
-
-                    new_b.append(i_b)
-
-                    d.append(local_s[i] - local_s[j]) # Small value indicates #{1} is ranked higher.
-                    z.append(local_y[i].item() == True) # True indicates the itesm are ranked correctly (#{0} > #{1}).
-
-        if len(d) == 0:
+        if m.sum().item() == 0:
             raise EmptyBatchException
 
-        device = y.device
-        new_b = torch.tensor(new_b, dtype=torch.long, device=device)
-        d = torch.cat(d)
-        z = torch.tensor(z, dtype=torch.float, device=device)
+        mat_d = s.view(-1, 1) - s.view(1, -1)
+        mat_y = y.view(-1, 1).repeat(1, y.shape[0])
+        d = mat_d[m]
+        z = mat_y[m].float()
 
         loss = nn.BCEWithLogitsLoss()(d, z)
 
@@ -118,6 +96,7 @@ class Net(nn.Module):
         k = 1024
         input_size = 1024
 
+        # TODO: Move this into collate?
         b = torch.zeros(m, dtype=torch.long, device=device)
         x = torch.zeros(m, input_size, dtype=torch.float, device=device)
         y = torch.zeros(m, dtype=torch.long, device=device)
@@ -141,6 +120,7 @@ class Net(nn.Module):
         b, x, y = self.clean_batch(tgts, knn_tgts, keys, mask)
 
         s = self.enc(x)
+
         loss_output = self.loss(b, s, y)
 
         loss = loss_output['loss']
@@ -226,8 +206,9 @@ def main(args):
             try:
                 model_output = net(batch_map)
             except EmptyBatchException:
-                epoch_stats['skip'] += 1
+                epoch_debug['skip'] += 1
                 continue
+
             loss = model_output['loss']
             opt.zero_grad()
             loss.backward()
