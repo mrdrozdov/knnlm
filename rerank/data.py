@@ -329,7 +329,7 @@ def select_fold_knns_and_keys(context, fold, include_first=16, max_keys=1000000,
     return fold_info
 
 
-def build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, include_first=16, max_rows=20000, skip_read=False):
+def build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, include_first=16, max_rows=20000, skip_read=False, train=False):
     """
     1. Randomly select max rows from training. Only choose from the rows valid for training.
     2. From selected, choose up a number of knns without exceeding max keys.
@@ -362,10 +362,19 @@ def build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, include
         end = n
         trn_fold = np.concatenate(trn_fold, np.arange(start, end))
 
-    trn_fold_info = select_fold_knns_and_keys(context, trn_fold, include_first=include_first, max_keys=max_keys, max_rows=max_rows, skip_read=skip_read)
+    if train:
 
-    context['trn_fold'] = trn_fold
-    context['trn_fold_info'] = trn_fold_info
+        trn_fold_info = select_fold_knns_and_keys(context, trn_fold, include_first=include_first, max_keys=max_keys, max_rows=max_rows, skip_read=skip_read)
+
+        context['trn_fold'] = trn_fold
+        context['trn_fold_info'] = trn_fold_info
+
+    else:
+
+        dev_fold_info = select_fold_knns_and_keys(context, dev_fold, include_first=include_first, max_keys=max_keys, max_rows=max_rows, skip_read=skip_read)
+
+        context['dev_fold'] = dev_fold
+        context['dev_fold_info'] = dev_fold_info
 
     return context
 

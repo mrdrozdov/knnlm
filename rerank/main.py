@@ -157,37 +157,30 @@ def run_eval(batch_map, model_output):
     return output
 
 
-
-
-def main(args):
+def run_fold(context, train=False):
     num_workers = args.n_workers
     batch_size = args.batch_size
+    net = context['net']
+    opt = context['opt']
 
-    dstore = Dstore(args.dstore, args.dstore_size, 1024)
-    dstore.initialize(include_keys=True)
-    dstore.add_neighbors(args.lookup, args.lookup_k)
-    dstore.add_exact(args.lookup, args.lookup_k)
-    dstore_ = InMemoryDstore.from_dstore(dstore)
-
-    knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
-    knn_dstore.initialize(include_keys=True)
-
-    # build fold
-    context = {}
-    context['args'] = args
-    context['dstore'] = dstore_
-    context['knn_dstore'] = knn_dstore
+    # TRAIN DATA
 
     if args.demo:
-        context = build_fold_for_epoch(context, total=2, fold_id=0, include_first=8, max_keys=1000, max_rows=100, skip_read=args.skip_read)
+        context = build_fold_for_epoch(context, train=train, total=2, fold_id=0, include_first=8, max_keys=1000, max_rows=100, skip_read=args.skip_read)
 
     else:
-        context = build_fold_for_epoch(context, total=10, fold_id=0, max_keys=1000000, skip_read=args.skip_read)
+        context = build_fold_for_epoch(context, train=train, total=10, fold_id=0, max_keys=1000000, skip_read=args.skip_read)
 
     # build dataset, sampler, loader
-    trn_fold = context['trn_fold']
-    trn_fold_info = context['trn_fold_info']
-    dataset = KNNFoldDataset(trn_fold, trn_fold_info)
+    if train:
+        trn_fold = context['trn_fold']
+        trn_fold_info = context['trn_fold_info']
+        dataset = KNNFoldDataset(trn_fold, trn_fold_info)
+    else:
+        dev_fold = context['dev_fold']
+        dev_fold_info = context['dev_fold_info']
+        dataset = KNNFoldDataset(dev_fold, dev_fold_info)
+
     sampler = BatchSampler(dataset, batch_size=batch_size)
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -197,44 +190,83 @@ def main(args):
         collate_fn=build_collate_fold(context, dataset),
         )
 
+    # TRAIN
+
+    epoch_debug = collections.Counter()
+    epoch_metrics = collections.defaultdict(list)
+
+    for batch_map in tqdm(loader, desc='train'):
+        try:
+            model_output = net(batch_map)
+        except EmptyBatchException:
+            epoch_debug['skip'] += 1
+            continue
+
+        loss = model_output['loss']
+
+        if train:
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+        eval_output = run_eval(batch_map, model_output)
+
+        epoch_metrics['loss'].append(loss.item())
+        epoch_metrics['correct'].append(eval_output['correct'])
+        epoch_metrics['total'].append(eval_output['total'])
+
+    # END OF EPOCH
+
+    print('epoch-debug: {}'.format(json.dumps(epoch_debug)))
+    print('avg-loss: {:.3f}'.format(np.mean(epoch_metrics['loss'])))
+
+    correct = np.sum(epoch_metrics['correct'])
+    total = np.sum(epoch_metrics['total'])
+    acc = correct / total
+
+    print('acc: {:.5f} ({}/{})'.format(acc, correct, total))
+
+
+def main(args):
+    num_workers = args.n_workers
+    batch_size = args.batch_size
+
+    trn_dstore = Dstore(args.dstore, args.dstore_size, 1024)
+    trn_dstore.initialize(include_keys=True)
+    trn_dstore.add_neighbors(args.lookup, args.lookup_k)
+    trn_dstore.add_exact(args.lookup, args.lookup_k)
+    trn_dstore_ = InMemoryDstore.from_dstore(trn_dstore)
+
+    knn_dstore = Dstore(args.knn_dstore, args.knn_dstore_size, 1024)
+    knn_dstore.initialize(include_keys=True)
+
+    context = {}
+    context['args'] = args
+    context['dstore'] = trn_dstore_
+    context['knn_dstore'] = knn_dstore
+
     # net
     net = Net.from_context(context)
     if args.cuda:
         net.cuda()
     opt = optim.Adam(net.parameters(), lr=args.lr)
+    context['net'] = net
+    context['opt'] = opt
 
     for epoch in range(args.max_epoch):
-
-        epoch_debug = collections.Counter()
-        epoch_metrics = collections.defaultdict(list)
-
-        for batch_map in tqdm(loader, desc='train'):
-            try:
-                model_output = net(batch_map)
-            except EmptyBatchException:
-                epoch_debug['skip'] += 1
-                continue
-
-            loss = model_output['loss']
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            eval_output = run_eval(batch_map, model_output)
-
-            epoch_metrics['loss'].append(loss.item())
-            epoch_metrics['correct'].append(eval_output['correct'])
-            epoch_metrics['total'].append(eval_output['total'])
-
         print('epoch: {}'.format(epoch))
-        print('epoch-debug: {}'.format(json.dumps(epoch_debug)))
-        print('avg-loss: {:.3f}'.format(np.mean(epoch_metrics['loss'])))
 
-        correct = np.sum(epoch_metrics['correct'])
-        total = np.sum(epoch_metrics['total'])
-        acc = correct / total
+        # TRAIN
+        print('train')
+        run_fold(context.copy(), train=True)
+        print('')
 
-        print('acc: {:.5f} ({}/{})'.format(acc, correct, total))
+        # VALIDATION
+        print('validation')
+        with torch.no_grad():
+            run_fold(context.copy(), train=False)
+        print('')
+
 
 if __name__ == '__main__':
     import argparse
@@ -256,6 +288,7 @@ if __name__ == '__main__':
     parser.add_argument('--n-workers', default=0, type=int)
     parser.add_argument('--mp', action='store_true')
     parser.add_argument('--demo', action='store_true')
+    parser.add_argument('--test', action='store_true')
     parser.add_argument('--skip-read', action='store_true')
     args = parser.parse_args()
     main(args)
